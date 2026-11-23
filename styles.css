@@ -6,6 +6,8 @@
 	overflow: hidden;
 	background: var(--background-primary);
 	color: var(--text-normal);
+	/* Layout responds to the pane's width, not the window's (sidebars, split panes) */
+	container: st-view / inline-size;
 }
 
 .st-shell {
@@ -40,6 +42,9 @@
 	--st-accent: var(--text-muted);
 }
 
+/* Buttons below are written as `.st-shell button.x` so they outrank Obsidian's
+   base `button:not(.clickable-icon)` rule (color, background, shadow). */
+
 /* ── Top Toolbar ─────────────────────────────────────────────────────────── */
 
 .st-toolbar {
@@ -56,10 +61,15 @@
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	flex-wrap: wrap;
+}
+
+.st-toolbar-left {
+	min-width: 0;
+	flex: 1 1 0;
 }
 
 .st-deck-select {
+	min-width: 0;
 	max-width: 190px;
 	height: 30px;
 	font-size: var(--font-ui-small);
@@ -87,6 +97,21 @@
 	white-space: nowrap;
 }
 
+.st-progress {
+	flex: 0 0 100%;
+	height: 3px;
+	border-radius: 999px;
+	background: var(--background-modifier-border);
+	overflow: hidden;
+}
+
+.st-progress-fill {
+	width: var(--st-progress, 0%);
+	height: 100%;
+	border-radius: inherit;
+	background: var(--interactive-accent);
+}
+
 .st-sort-toggle {
 	display: inline-flex;
 	padding: 2px;
@@ -95,7 +120,7 @@
 	border: 1px solid var(--background-modifier-border);
 }
 
-.st-sort-btn {
+.st-shell button.st-sort-btn {
 	background: transparent;
 	border: none;
 	box-shadow: none;
@@ -109,17 +134,17 @@
 	line-height: 1.3;
 }
 
-.st-sort-btn:hover {
+.st-shell button.st-sort-btn:hover {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
 }
 
-.st-sort-btn.is-active {
+.st-shell button.st-sort-btn.is-active {
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
 }
 
-.st-icon-btn {
+.st-shell button.st-icon-btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -134,12 +159,12 @@
 	box-shadow: none;
 }
 
-.st-icon-btn:hover:not(:disabled) {
+.st-shell button.st-icon-btn:hover:not(:disabled) {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
 }
 
-.st-icon-btn:disabled {
+.st-shell button.st-icon-btn:disabled {
 	opacity: 0.4;
 	cursor: default;
 }
@@ -147,11 +172,6 @@
 .st-icon-btn svg {
 	width: 15px;
 	height: 15px;
-}
-
-.st-trash-count {
-	font-size: var(--font-ui-smaller);
-	font-weight: 600;
 }
 
 /* ── Card Stage & Stack ──────────────────────────────────────────────────── */
@@ -176,7 +196,8 @@
 
 .st-card {
 	position: absolute;
-	inset: 0;
+	/* Bottom gap is where the next card peeks out */
+	inset: 0 0 10px;
 	display: flex;
 	flex-direction: column;
 	background: var(--background-secondary);
@@ -192,6 +213,7 @@
 }
 
 .st-card--next {
+	transform-origin: 50% 100%;
 	transform: scale(0.95) translateY(10px);
 	opacity: 0.55;
 	pointer-events: none;
@@ -242,64 +264,62 @@
 	transform: translate3d(0, -560px, 0);
 }
 
-/* Dynamic border highlight based on swipe direction color */
+/* Swipe feedback: the direction's colour drives the border, wash and stamp */
 .st-card--active[data-swipe-color="green"] {
-	border-color: color-mix(in srgb, var(--color-green) 70%, var(--background-modifier-border));
+	--st-swipe-accent: var(--color-green);
 }
 .st-card--active[data-swipe-color="red"] {
-	border-color: color-mix(in srgb, var(--color-red) 70%, var(--background-modifier-border));
+	--st-swipe-accent: var(--color-red);
 }
 .st-card--active[data-swipe-color="orange"] {
-	border-color: color-mix(in srgb, var(--color-orange) 70%, var(--background-modifier-border));
+	--st-swipe-accent: var(--color-orange);
 }
 .st-card--active[data-swipe-color="blue"] {
-	border-color: color-mix(in srgb, var(--color-blue) 70%, var(--background-modifier-border));
+	--st-swipe-accent: var(--color-blue);
 }
 .st-card--active[data-swipe-color="purple"] {
-	border-color: color-mix(in srgb, var(--color-purple) 70%, var(--background-modifier-border));
+	--st-swipe-accent: var(--color-purple);
+}
+.st-card--active[data-swipe-color="muted"] {
+	--st-swipe-accent: var(--text-muted);
+}
+
+.st-card--active[data-swipe-color] {
+	border-color: color-mix(in srgb, var(--st-swipe-accent) 70%, var(--background-modifier-border));
+}
+
+.st-card--active::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	z-index: 5;
+	pointer-events: none;
+	background: var(--st-swipe-accent, transparent);
+	opacity: calc(var(--st-swipe-progress, 0) * 0.12);
 }
 
 /* ── Directional Stamps ──────────────────────────────────────────────────── */
 
+/* Centred, so the verdict never lands on top of the badges or title */
 .st-stamp {
 	position: absolute;
+	top: 42%;
+	left: 50%;
 	z-index: 10;
 	pointer-events: none;
-	font-size: 22px;
+	font-size: 30px;
 	font-weight: 800;
 	letter-spacing: 0.08em;
-	padding: 6px 14px;
-	border-radius: 10px;
+	white-space: nowrap;
+	padding: 6px 18px;
+	border-radius: 12px;
 	color: var(--st-accent, var(--text-normal));
 	border: 3px solid currentColor;
 	opacity: 0;
-	background: color-mix(in srgb, var(--background-primary) 88%, transparent);
-	backdrop-filter: blur(4px);
-	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
-}
-
-.st-stamp--right {
-	top: 22px;
-	left: 20px;
-	transform: rotate(-14deg);
-}
-
-.st-stamp--left {
-	top: 22px;
-	right: 20px;
-	transform: rotate(14deg);
-}
-
-.st-stamp--down {
-	top: 20px;
-	left: 50%;
-	transform: translateX(-50%);
-}
-
-.st-stamp--up {
-	bottom: 64px;
-	left: 50%;
-	transform: translateX(-50%);
+	background: var(--background-primary);
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+	transform: translate(-50%, -50%) rotate(-6deg)
+		scale(calc(0.8 + 0.2 * var(--st-swipe-progress, 0)));
 }
 
 .st-card--active[data-swipe-dir="right"] .st-stamp--right,
@@ -370,7 +390,11 @@
 	background: color-mix(in srgb, var(--color-orange) 14%, var(--background-primary));
 }
 
+/* Tags read as text so the date, score and effort pills carry the header */
 .st-badge--tag {
+	padding: 3px 1px;
+	border-color: transparent;
+	background: transparent;
 	font-weight: 500;
 	color: var(--text-accent);
 }
@@ -581,12 +605,15 @@
 
 .st-action-bar {
 	display: grid;
-	grid-template-columns: repeat(6, 1fr);
+	/* Undo and Skip are secondary: narrower than the four verdicts */
+	grid-template-columns:
+		minmax(0, 0.62fr) repeat(2, minmax(0, 1fr))
+		minmax(0, 0.62fr) repeat(2, minmax(0, 1fr));
 	gap: 8px;
 	flex-shrink: 0;
 }
 
-.st-action-btn {
+.st-shell button.st-action-btn {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
@@ -603,27 +630,33 @@
 	transition: transform 100ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 
-.st-action-btn:hover:not(:disabled) {
+.st-shell button.st-action-btn:hover:not(:disabled) {
 	background: var(--background-modifier-hover);
 	transform: translateY(-1px);
 }
 
-.st-action-btn:active:not(:disabled) {
+.st-shell button.st-action-btn:active:not(:disabled) {
 	transform: scale(0.96);
 }
 
-.st-action-btn:disabled {
+.st-shell button.st-action-btn:disabled {
 	opacity: 0.35;
 	cursor: default;
 }
 
-.st-action-btn--dir {
-	color: var(--st-accent, var(--text-normal));
-	border-color: color-mix(in srgb, var(--st-accent, var(--text-muted)) 38%, var(--background-modifier-border));
+.st-shell button.st-action-btn--minor {
+	background: transparent;
+	color: var(--text-muted);
 }
 
-.st-action-btn--dir:hover:not(:disabled) {
-	background: color-mix(in srgb, var(--st-accent, var(--text-muted)) 14%, var(--background-secondary));
+.st-shell button.st-action-btn--dir {
+	color: var(--st-accent, var(--text-normal));
+	border-color: color-mix(in srgb, var(--st-accent, var(--text-muted)) 40%, var(--background-modifier-border));
+	background: color-mix(in srgb, var(--st-accent, var(--text-muted)) 9%, var(--background-secondary));
+}
+
+.st-shell button.st-action-btn--dir:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--st-accent, var(--text-muted)) 20%, var(--background-secondary));
 }
 
 .st-action-icon {
@@ -794,7 +827,7 @@
 	.st-card,
 	.st-card--next.is-promoting,
 	.st-card--active.is-exiting,
-	.st-action-btn,
+	.st-shell button.st-action-btn,
 	.st-how-chevron {
 		transition: none;
 	}
@@ -802,14 +835,10 @@
 
 /* ── Mobile / Narrow Pane Ergonomics ─────────────────────────────────────── */
 
-@media (max-width: 600px) {
+@container st-view (max-width: 600px) {
 	.st-shell {
 		padding: 8px 10px 12px;
 		gap: 8px;
-	}
-
-	.st-deck-select {
-		max-width: 140px;
 	}
 
 	.st-card-meta {
@@ -833,16 +862,29 @@
 		gap: 5px;
 	}
 
-	.st-action-btn {
+	.st-shell button.st-action-btn {
 		padding: 8px 2px;
 	}
 
-	.st-action-hotkey {
+	/* The More menu carries the sort choice here */
+	.st-sort-toggle {
+		display: none;
+	}
+
+	/* Keep the swipe arrow, drop the keyboard letters */
+	.st-action-key {
 		display: none;
 	}
 
 	.st-stamp {
-		font-size: 18px;
-		padding: 4px 10px;
+		font-size: 24px;
+		padding: 4px 14px;
+	}
+}
+
+/* Very narrow panes: Undo and Skip fall back to their icons */
+@container st-view (max-width: 380px) {
+	.st-action-btn--minor .st-action-label {
+		display: none;
 	}
 }
