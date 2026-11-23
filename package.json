@@ -1,0 +1,38 @@
+{
+  "name": "obsidian-swipe-triage",
+  "version": "1.0.0",
+  "description": "Turn any folder of notes or multi-card Markdown digests into a mobile-friendly swipe deck for fast human and AI-assisted triage.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "lint": "eslint src",
+    "test": "node test/run-tests.mjs",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "triage",
+    "swipe",
+    "inbox",
+    "ai-workflow",
+    "markdown"
+  ],
+  "author": "Scott Cragun",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scottiebakana/obsidian-swipe-triage.git"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.18.0",
+    "eslint-plugin-obsidianmd": "latest",
+    "obsidian": "latest",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.20.0"
+  }
+}
