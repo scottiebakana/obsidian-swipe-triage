@@ -49,7 +49,7 @@ On the next run, your AI script reads recent `**Verdict:**` lines (`more-like-th
   - **One note per card (`notes` mode):** Dump fleeting notes, web clippings, bookmarks, or inbox drafts into a folder. Swipe to move notes into reversible subfolders (`./Keep`, `./Archive`, `./Someday`, `./Dismissed`), set frontmatter verdicts, append `- [ ] [[Note]]` links to a saved note, or optionally trash.
 - **Safe defaults & full Undo:** All 3 starter presets use **reversible** actions (moves, verdict updates, and sink-note appends) so an accidental swipe can always be undone with `Cmd/Ctrl+Z`. Permanent `trash` is available as an explicit opt-in action.
 - **1-click folder scaffolder:** Run **Swipe Triage: Create triage folder** to scaffold a ready-to-swipe folder (`Inbox triage`, `AI digest feed`, or `Reading queue`) with `_deck.md`, subfolders or `saved.md`, and starter sample cards—without ever silently overwriting an existing `_deck.md`.
-- **Built-in AI prompt & schema copy:** Click the robot icon (or run **Swipe Triage: Copy AI prompt for active deck**) to copy a tailored prompt telling any AI agent the exact format to write and how to read your past verdicts back.
+- **Built-in AI prompt & schema copy:** Choose **Copy AI prompt** from the deck's ⋯ menu (or run **Swipe Triage: Copy AI prompt for active deck**) to copy a tailored prompt telling any AI agent the exact format to write and how to read your past verdicts back.
 - **Live auto-refresh + mobile native (`isDesktopOnly: false`):** Automatically picks up newly dropped files from agents or sync, supports smooth 4-direction touch & mouse drag physics, keyboard shortcuts, and Obsidian light/dark themes.
 
 ---

@@ -3,6 +3,7 @@ import {
 	ItemView,
 	Keymap,
 	MarkdownRenderer,
+	Menu,
 	Notice,
 	Platform,
 	Scope,
@@ -40,12 +41,24 @@ const DIRECTION_ICON: Record<SwipeDirection, string> = {
 	right: "star",
 };
 
-const DIRECTION_HOTKEY: Record<SwipeDirection, string> = {
-	left: "← / A",
-	down: "↓ / S",
-	up: "↑ / W",
-	right: "→ / D",
+const DIRECTION_ARROW: Record<SwipeDirection, string> = {
+	left: "←",
+	down: "↓",
+	up: "↑",
+	right: "→",
 };
+
+const DIRECTION_KEY: Record<SwipeDirection, string> = {
+	left: "A",
+	down: "S",
+	up: "W",
+	right: "D",
+};
+
+const SORT_MODES: [SortMode, string][] = [
+	["newest", "Newest"],
+	["score", "Top score"],
+];
 
 function isEditableTarget(target: EventTarget | null): boolean {
 	// Duck-typed on purpose: `instanceof HTMLElement` is false for elements in pop-out windows
@@ -644,11 +657,13 @@ export class SwipeTriageView extends ItemView {
 		}
 
 		const pendingCount = this.queue.length;
-		const counterText =
-			pendingCount > 0 ? `1 / ${pendingCount} pending` : "0 pending";
-		leftGroup.createSpan({ cls: "st-progress-pill", text: counterText });
-
 		const triaged = this.getSessionTotalTriaged();
+		if (this.activeDeck) {
+			leftGroup.createSpan({
+				cls: "st-progress-pill",
+				text: `${pendingCount} left`,
+			});
+		}
 		if (triaged > 0) {
 			leftGroup.createSpan({
 				cls: "st-session-pill",
@@ -656,88 +671,108 @@ export class SwipeTriageView extends ItemView {
 			});
 		}
 
-		// Right: sort toggle + quick actions
 		const rightGroup = bar.createDiv({ cls: "st-toolbar-right" });
 
-		const sortGroup = rightGroup.createDiv({
-			cls: "st-sort-toggle",
-			attr: { role: "group", "aria-label": "Sort items" },
-		});
+		if (this.hasScoredCards()) {
+			// Hidden in the compact layout, where the More menu carries the same choice
+			const sortGroup = rightGroup.createDiv({
+				cls: "st-sort-toggle",
+				attr: { role: "group", "aria-label": "Sort items" },
+			});
+			for (const [mode, text] of SORT_MODES) {
+				const active = this.sortMode === mode;
+				const btn = sortGroup.createEl("button", {
+					cls: `st-sort-btn${active ? " is-active" : ""}`,
+					text,
+					attr: { "aria-pressed": String(active) },
+				});
+				btn.addEventListener("click", () => this.setSortMode(mode));
+			}
+		}
 
-		const newestBtn = sortGroup.createEl("button", {
-			cls: `st-sort-btn${this.sortMode === "newest" ? " is-active" : ""}`,
-			text: "Newest",
-			attr: { "aria-pressed": String(this.sortMode === "newest") },
-		});
-		newestBtn.addEventListener("click", () => this.setSortMode("newest"));
-
-		const scoreBtn = sortGroup.createEl("button", {
-			cls: `st-sort-btn${this.sortMode === "score" ? " is-active" : ""}`,
-			text: "Top score",
-			attr: { "aria-pressed": String(this.sortMode === "score") },
-		});
-		scoreBtn.addEventListener("click", () => this.setSortMode("score"));
-
-		// Copy AI prompt button
-		const promptBtn = rightGroup.createEl("button", {
-			cls: "st-icon-btn",
-			attr: {
-				"aria-label": "Copy AI prompt for this deck",
-			},
-		});
-		setIcon(promptBtn, "bot");
-		promptBtn.disabled = !this.activeDeck;
-		promptBtn.addEventListener("click", () => this.openAiPromptModal());
-
-		// Open underlying note button
 		const openNoteBtn = rightGroup.createEl("button", {
 			cls: "st-icon-btn",
-			attr: {
-				"aria-label": "Open source note (O)",
-			},
+			attr: { "aria-label": "Open source note (O)" },
 		});
 		setIcon(openNoteBtn, "file-text");
 		openNoteBtn.disabled = this.queue.length === 0;
 		openNoteBtn.addEventListener("click", () => void this.openCurrentSourceNote());
 
-		// Create new triage folder button
-		const newFolderBtn = rightGroup.createEl("button", {
+		const moreBtn = rightGroup.createEl("button", {
 			cls: "st-icon-btn",
-			attr: {
-				"aria-label": "Create new triage folder",
-			},
+			attr: { "aria-label": "More actions", "aria-haspopup": "menu" },
 		});
-		setIcon(newFolderBtn, "folder-plus");
-		newFolderBtn.addEventListener("click", () => this.openCreateFolderModal());
+		setIcon(moreBtn, "more-horizontal");
+		moreBtn.addEventListener("click", () => this.openMoreMenu(moreBtn));
 
-		// Refresh button
-		const refreshBtn = rightGroup.createEl("button", {
-			cls: "st-icon-btn",
-			attr: {
-				"aria-label": "Refresh deck",
-			},
-		});
-		setIcon(refreshBtn, "refresh-cw");
-		refreshBtn.addEventListener("click", () => void this.reloadDeck());
-
-		// Empty digest cleanup button (cards mode only)
-		if (
-			this.activeDeck?.mode === "cards" &&
-			this.zeroCardFiles.length > 0
-		) {
-			const trashBtn = rightGroup.createEl("button", {
-				cls: "st-icon-btn st-trash-pill-btn",
+		const total = triaged + pendingCount;
+		if (this.activeDeck && total > 0) {
+			const track = bar.createDiv({
+				cls: "st-progress",
 				attr: {
-					"aria-label": `Trash ${this.zeroCardFiles.length} empty digest notes`,
+					role: "progressbar",
+					"aria-label": "Session progress",
+					"aria-valuemin": "0",
+					"aria-valuemax": String(total),
+					"aria-valuenow": String(triaged),
 				},
 			});
-			setIcon(trashBtn, "trash-2");
-			trashBtn.createSpan({
-				cls: "st-trash-count",
-				text: String(this.zeroCardFiles.length),
+			track.createDiv({ cls: "st-progress-fill" }).setCssProps({
+				"--st-progress": `${((triaged / total) * 100).toFixed(1)}%`,
 			});
-			trashBtn.addEventListener("click", () => this.openTrashEmptyModal());
 		}
+	}
+
+	/** Sorting by score only means something when a card carries one. */
+	private hasScoredCards(): boolean {
+		return this.queue.some((c) => c.score !== null);
+	}
+
+	private openMoreMenu(anchor: HTMLElement): void {
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle("Copy AI prompt")
+				.setIcon("bot")
+				.setDisabled(!this.activeDeck)
+				.onClick(() => this.openAiPromptModal())
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("New triage folder")
+				.setIcon("folder-plus")
+				.onClick(() => this.openCreateFolderModal())
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh deck")
+				.setIcon("refresh-cw")
+				.onClick(() => void this.reloadDeck())
+		);
+		if (this.hasScoredCards()) {
+			menu.addSeparator();
+			for (const [mode, text] of SORT_MODES) {
+				menu.addItem((item) =>
+					item
+						.setTitle(`Sort by ${text.toLowerCase()}`)
+						.setChecked(this.sortMode === mode)
+						.onClick(() => this.setSortMode(mode))
+				);
+			}
+		}
+		const emptyCount = this.zeroCardFiles.length;
+		if (this.activeDeck?.mode === "cards" && emptyCount > 0) {
+			menu.addSeparator();
+			menu.addItem((item) =>
+				item
+					.setTitle(`Trash ${emptyCount} empty digest notes`)
+					.setIcon("trash-2")
+					.setWarning(true)
+					.onClick(() => this.openTrashEmptyModal())
+			);
+		}
+		const rect = anchor.getBoundingClientRect();
+		menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
 	}
 
 	private renderDeck(stage: HTMLElement): void {
@@ -983,6 +1018,8 @@ export class SwipeTriageView extends ItemView {
 			color?: DirectionColor;
 			icon: string;
 			label: string;
+			/** Swipe direction glyph; stays visible in the compact layout. */
+			arrow?: string;
 			hotkey: string;
 			disabled?: boolean;
 			onClick: () => void;
@@ -991,20 +1028,29 @@ export class SwipeTriageView extends ItemView {
 			const btn = bar.createEl("button", {
 				cls: `st-action-btn ${opts.cls}${colorClass}`,
 				attr: {
-					"aria-label": `${opts.label} (${opts.hotkey})`,
+					"aria-label": `${opts.label} (${[opts.arrow, opts.hotkey]
+						.filter(Boolean)
+						.join(" / ")})`,
 				},
 			});
 			btn.disabled = Boolean(opts.disabled);
 			const iconWrap = btn.createSpan({ cls: "st-action-icon" });
 			setIcon(iconWrap, opts.icon);
 			btn.createSpan({ cls: "st-action-label", text: opts.label });
-			btn.createSpan({ cls: "st-action-hotkey", text: opts.hotkey });
+			const hint = btn.createSpan({ cls: "st-action-hotkey" });
+			if (opts.arrow) {
+				hint.createSpan({ cls: "st-action-arrow", text: opts.arrow });
+			}
+			hint.createSpan({
+				cls: "st-action-key",
+				text: opts.arrow ? ` / ${opts.hotkey}` : opts.hotkey,
+			});
 			btn.addEventListener("click", opts.onClick);
 			return btn;
 		};
 
 		makeBtn({
-			cls: "st-action-btn--undo",
+			cls: "st-action-btn--minor",
 			icon: "undo-2",
 			label: "Undo",
 			hotkey: Platform.isMacOS ? "⌘Z" : "Ctrl+Z",
@@ -1018,7 +1064,8 @@ export class SwipeTriageView extends ItemView {
 			color: leftCfg.color,
 			icon: leftCfg.action === "trash" ? "trash-2" : DIRECTION_ICON.left,
 			label: leftCfg.label,
-			hotkey: DIRECTION_HOTKEY.left,
+			arrow: DIRECTION_ARROW.left,
+			hotkey: DIRECTION_KEY.left,
 			onClick: () => void this.triggerSwipe("left"),
 		});
 
@@ -1028,12 +1075,13 @@ export class SwipeTriageView extends ItemView {
 			color: downCfg.color,
 			icon: DIRECTION_ICON.down,
 			label: downCfg.label,
-			hotkey: DIRECTION_HOTKEY.down,
+			arrow: DIRECTION_ARROW.down,
+			hotkey: DIRECTION_KEY.down,
 			onClick: () => void this.triggerSwipe("down"),
 		});
 
 		makeBtn({
-			cls: "st-action-btn--skip",
+			cls: "st-action-btn--minor",
 			icon: "skip-forward",
 			label: "Skip",
 			hotkey: "Space",
@@ -1046,7 +1094,8 @@ export class SwipeTriageView extends ItemView {
 			color: upCfg.color,
 			icon: DIRECTION_ICON.up,
 			label: upCfg.label,
-			hotkey: DIRECTION_HOTKEY.up,
+			arrow: DIRECTION_ARROW.up,
+			hotkey: DIRECTION_KEY.up,
 			onClick: () => void this.triggerSwipe("up"),
 		});
 
@@ -1056,7 +1105,8 @@ export class SwipeTriageView extends ItemView {
 			color: rightCfg.color,
 			icon: DIRECTION_ICON.right,
 			label: rightCfg.label,
-			hotkey: DIRECTION_HOTKEY.right,
+			arrow: DIRECTION_ARROW.right,
+			hotkey: DIRECTION_KEY.right,
 			onClick: () => void this.triggerSwipe("right"),
 		});
 	}
