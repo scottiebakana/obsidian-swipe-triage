@@ -284,3 +284,32 @@ test("missing file throws StaleDeckError and invalid file_pattern fails closed w
 	assert.equal(badScan.patternErrors.length, 1);
 	assert.equal(badScan.pendingCards.length, 0);
 });
+
+test("notes-mode sink target without .md gets the extension, and a blank verdict falls back to the label so the note leaves the queue", async () => {
+	const fake = new FakeApp();
+	const service = new SwipeTriageVaultService(fake as unknown as App);
+	const deck = createDeckFromPreset("reading-queue", "Reading");
+	deck.directions.right = {
+		label: "Star",
+		verdict: "",
+		color: "green",
+		action: "append-note",
+		targetNote: "Lists/starred",
+		targetHeading: "## Starred",
+	};
+
+	fake.seedFile("Reading/article.md", "---\ntitle: Article\n---\n\nBody.\n");
+
+	const scan = await service.scanDeck(deck);
+	const undoEntry = await service.applySwipe(deck, scan.pendingCards[0], "right");
+
+	assert.equal(fake.readRaw("Lists/starred"), undefined);
+	assert.match(fake.readRaw("Lists/starred.md") ?? "", /- \[ \] \[\[article\]\]/);
+	assert.match(fake.readRaw("Reading/article.md") ?? "", /verdict: star/);
+	assert.equal((await service.scanDeck(deck)).pendingCards.length, 0);
+
+	await service.undoSwipe(undoEntry);
+	assert.doesNotMatch(fake.readRaw("Reading/article.md") ?? "", /verdict/);
+	assert.doesNotMatch(fake.readRaw("Lists/starred.md") ?? "", /article/);
+	assert.equal((await service.scanDeck(deck)).pendingCards.length, 1);
+});

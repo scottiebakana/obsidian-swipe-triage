@@ -54,6 +54,8 @@ function resolveRelativeTarget(
 	if (!rawTarget) return undefined;
 	const trimmed = rawTarget.trim().replace(/^\/+/, "");
 	if (!trimmed) return undefined;
+	// A `_deck.md` can arrive from sync, a shared vault, or an AI agent: never let it point outside the vault
+	if (trimmed.split(/[\\/]/).includes("..")) return undefined;
 	if (trimmed.startsWith("./")) {
 		const sub = trimmed.slice(2);
 		return folderPath ? `${folderPath}/${sub}` : sub;
@@ -400,7 +402,7 @@ export function generateSampleFiles(
 				relativeName: `sample-digest-${todayIso}.md`,
 				content: [
 					"---",
-					`title: "${deck.name} — ${todayIso}"`,
+					`title: ${yamlQuote(`${deck.name} — ${todayIso}`)}`,
 					"status: new",
 					`created: ${todayIso}`,
 					"tags: [swipe-triage, sample]",

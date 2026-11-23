@@ -140,9 +140,19 @@ Any `## ` (or `### `) heading outside fenced code blocks containing a `**Verdict
 
 ---
 
+## Privacy
+
+Swipe Triage works entirely inside your vault. It makes no network requests, collects no telemetry, and never reads or writes files outside the vault. "AI-assisted" means the plugin hands you a prompt to paste into the tool of your choice; it never calls an AI service itself.
+
+---
+
 ## Installation
 
-### Via BRAT (recommended while community listing is pending)
+### From Community plugins (once the listing is approved)
+1. Open *Settings → Community plugins → Browse* and search for **Swipe Triage**.
+2. Select **Install**, then **Enable**.
+
+### Via BRAT (while the community listing is pending)
 1. Install the **BRAT** community plugin in Obsidian.
 2. Run **BRAT: Add a beta plugin for testing** and paste `scottiebakana/obsidian-swipe-triage`.
 3. Enable **Swipe Triage** in *Settings → Community plugins*.

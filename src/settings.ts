@@ -29,6 +29,12 @@ export class SwipeTriageSettingTab extends PluginSettingTab {
 		this.selectedDeckId = plugin.settings.activeDeckId;
 	}
 
+	hide(): void {
+		// Text fields save per keystroke without touching open decks; catch them up on close
+		this.plugin.refreshOpenViews();
+		super.hide();
+	}
+
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
