@@ -788,6 +788,18 @@
 	margin-bottom: 8px;
 }
 
+/* ── Reduced Motion ──────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+	.st-card,
+	.st-card--next.is-promoting,
+	.st-card--active.is-exiting,
+	.st-action-btn,
+	.st-how-chevron {
+		transition: none;
+	}
+}
+
 /* ── Mobile / Narrow Pane Ergonomics ─────────────────────────────────────── */
 
 @media (max-width: 600px) {

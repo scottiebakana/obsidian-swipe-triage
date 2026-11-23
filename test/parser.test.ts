@@ -8,6 +8,7 @@ import {
 } from "../src/deckConfig.ts";
 import {
 	appendSinkEntry,
+	formatLocalDate,
 	formatSinkEntry,
 	matchesDeckFileFilters,
 	parseDigestFile,
@@ -359,4 +360,29 @@ test("deck scaffolding, filters, sorting, and AI prompt generation work across a
 	assert.ok(prompt.includes("AI-Digest/"));
 	assert.ok(prompt.includes("**Verdict:** pending"));
 	assert.ok(prompt.includes("more-like-this"));
+});
+
+test("_deck.md targets cannot escape the vault and dates use the local day", () => {
+	const deck = parseDeckConfigFromFrontmatter(
+		{
+			"swipe-triage": true,
+			mode: "notes",
+			directions: {
+				left: { action: "move", target_folder: "../../outside" },
+				right: { action: "append-note", target_note: "./../../outside.md" },
+				up: { action: "move", target_folder: "./Done" },
+			},
+		},
+		"Inbox",
+		"Inbox/_deck.md"
+	);
+	assert.ok(deck);
+	assert.equal(deck.directions.left.targetFolder, undefined);
+	assert.equal(deck.directions.right.targetNote, undefined);
+	assert.equal(deck.directions.up.targetFolder, "Inbox/Done");
+
+	// 23:30 local is already "tomorrow" in UTC for every zone west of Greenwich
+	const lateEvening = new Date(2026, 10, 22, 23, 30).getTime();
+	assert.equal(formatLocalDate(lateEvening), "2026-11-22");
+	assert.equal(formatLocalDate(0), "");
 });

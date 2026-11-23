@@ -164,9 +164,15 @@ export function extractDateFromFileName(fileName: string): string {
 	return match ? match[1] : "";
 }
 
-function formatDateFromMs(ms: number): string {
+/**
+ * Formats a timestamp as YYYY-MM-DD in the user's local time zone.
+ * (`toISOString()` reports the UTC day, which is tomorrow every evening west of Greenwich.)
+ */
+export function formatLocalDate(ms: number = Date.now()): string {
 	if (!Number.isFinite(ms) || ms <= 0) return "";
-	return new Date(ms).toISOString().slice(0, 10);
+	const d = new Date(ms);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function findBodyStartLine(lines: LineToken[]): number {
@@ -683,7 +689,7 @@ export function parseNoteCard(
 	const date =
 		(dateMatch ? dateMatch[1] : "") ||
 		extractDateFromFileName(fileName) ||
-		formatDateFromMs(ctimeMs);
+		formatLocalDate(ctimeMs);
 
 	const score = asNumber(
 		getFrontmatterValue(frontmatter, ["score", "rating", "priority"])

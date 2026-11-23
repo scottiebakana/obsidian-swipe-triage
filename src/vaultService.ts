@@ -7,6 +7,7 @@ import {
 } from "./deckConfig";
 import {
 	appendSinkEntry,
+	formatLocalDate,
 	formatSinkEntry,
 	matchesDeckFileFilters,
 	parseDigestFile,
@@ -20,6 +21,7 @@ import {
 	DeckAlreadyExistsError,
 	StaleDeckError,
 	type DeckConfig,
+	type DirectionConfig,
 	type PresetId,
 	type SwipeDirection,
 	type SwipeTriageSettings,
@@ -33,6 +35,22 @@ export interface DeckScanResult {
 	totalCardCount: number;
 	folderExists: boolean;
 	patternErrors: string[];
+}
+
+/** Vault path of a sink note, with the `.md` extension Obsidian needs to list the file. */
+function sinkNotePath(target: string): string {
+	const path = normalizePath(target.trim());
+	return /\.md$/i.test(path) ? path : `${path}.md`;
+}
+
+/**
+ * Verdict written to a note's frontmatter (`notes` mode). Verdict-only actions
+ * fall back to the label, because a blank verdict would leave the note pending forever.
+ */
+function noteVerdictValue(cfg: DirectionConfig): string {
+	const verdict = cfg.verdict.trim();
+	if (verdict || cfg.action === "move") return verdict;
+	return cfg.label.trim().toLowerCase();
 }
 
 export class SwipeTriageVaultService {
@@ -123,7 +141,7 @@ export class SwipeTriageVaultService {
 		for (const d of dirs) {
 			const target = deck.directions[d].targetNote?.trim();
 			if (target) {
-				paths.add(normalizePath(target).toLowerCase());
+				paths.add(sinkNotePath(target).toLowerCase());
 			}
 		}
 		return paths;
@@ -170,9 +188,7 @@ export class SwipeTriageVaultService {
 		if (deck.mode === "cards") {
 			for (const file of candidateFiles) {
 				const content = await this.app.vault.cachedRead(file);
-				const fallbackDate = new Date(file.stat.ctime)
-					.toISOString()
-					.slice(0, 10);
+				const fallbackDate = formatLocalDate(file.stat.ctime);
 				const parsed = parseDigestFile(
 					content,
 					file.path,
@@ -293,7 +309,7 @@ export class SwipeTriageVaultService {
 			let createdSinkSection = false;
 
 			if (dirConfig.action === "append-note" && dirConfig.targetNote?.trim()) {
-				const sinkPath = normalizePath(dirConfig.targetNote.trim());
+				const sinkPath = sinkNotePath(dirConfig.targetNote);
 				const heading = dirConfig.targetHeading?.trim() || "## Saved items";
 				const entryLine = formatSinkEntry(card);
 				const res = await this.appendToSinkNote(sinkPath, heading, entryLine);
@@ -389,11 +405,12 @@ export class SwipeTriageVaultService {
 			};
 		}
 
+		const verdictValue = noteVerdictValue(dirConfig);
 		let wroteVerdict = false;
 		let hadPreviousVerdictProp = false;
 		let previousVerdict: string | undefined;
 
-		if (dirConfig.verdict.trim()) {
+		if (verdictValue) {
 			await this.app.fileManager.processFrontMatter(
 				file,
 				(fm: Record<string, unknown>) => {
@@ -405,7 +422,7 @@ export class SwipeTriageVaultService {
 								? String(prev)
 								: undefined;
 					}
-					fm[verdictField] = dirConfig.verdict.trim();
+					fm[verdictField] = verdictValue;
 					wroteVerdict = true;
 				}
 			);
@@ -419,7 +436,7 @@ export class SwipeTriageVaultService {
 
 		try {
 			if (dirConfig.action === "append-note" && dirConfig.targetNote?.trim()) {
-				const sinkPath = normalizePath(dirConfig.targetNote.trim());
+				const sinkPath = sinkNotePath(dirConfig.targetNote);
 				const heading = dirConfig.targetHeading?.trim() || "## Saved items";
 				const entryLine = formatSinkEntry(card);
 				const res = await this.appendToSinkNote(sinkPath, heading, entryLine);
@@ -551,7 +568,7 @@ export class SwipeTriageVaultService {
 			}
 
 			const verdictField = entry.deck.verdictField.trim() || "verdict";
-			if (entry.directionConfig.verdict.trim()) {
+			if (noteVerdictValue(entry.directionConfig)) {
 				await this.app.fileManager.processFrontMatter(
 					abstract,
 					(fm: Record<string, unknown>) => {
@@ -609,7 +626,7 @@ export class SwipeTriageVaultService {
 			if (!overwrite) {
 				throw new DeckAlreadyExistsError(existing.path);
 			}
-			await this.app.vault.modify(existing, content);
+			await this.app.vault.process(existing, () => content);
 			return existing;
 		}
 		return this.app.vault.create(deckPath, content);
@@ -654,7 +671,7 @@ export class SwipeTriageVaultService {
 				await this.ensureFolderExists(normalizePath(cfg.targetFolder));
 			}
 			if (cfg.action === "append-note" && cfg.targetNote) {
-				const sinkPath = normalizePath(cfg.targetNote);
+				const sinkPath = sinkNotePath(cfg.targetNote);
 				if (!this.app.vault.getAbstractFileByPath(sinkPath)) {
 					await this.createSinkNote(
 						sinkPath,
@@ -667,7 +684,7 @@ export class SwipeTriageVaultService {
 		const deckFile = await this.writeDeckFile(deck, overwriteDeckFile);
 
 		if (includeSamples) {
-			const today = new Date().toISOString().slice(0, 10);
+			const today = formatLocalDate();
 			const samples = generateSampleFiles(deck, today);
 			for (const sample of samples) {
 				const samplePath = cleanedFolder
@@ -716,7 +733,7 @@ export class SwipeTriageVaultService {
 		sectionHeading: string,
 		initialEntry?: string
 	): string {
-		const today = new Date().toISOString().slice(0, 10);
+		const today = formatLocalDate();
 		const basename =
 			sinkPath.split("/").pop()?.replace(/\.md$/i, "") || "Saved items";
 		const lines = [

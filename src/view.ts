@@ -1,8 +1,10 @@
 import {
 	Component,
 	ItemView,
+	Keymap,
 	MarkdownRenderer,
 	Notice,
+	Platform,
 	Scope,
 	TAbstractFile,
 	TFile,
@@ -46,12 +48,13 @@ const DIRECTION_HOTKEY: Record<SwipeDirection, string> = {
 };
 
 function isEditableTarget(target: EventTarget | null): boolean {
-	if (!(target instanceof HTMLElement)) return false;
-	const tag = target.tagName;
+	// Duck-typed on purpose: `instanceof HTMLElement` is false for elements in pop-out windows
+	const el = target as Partial<HTMLElement> | null;
+	const tag = el?.tagName;
 	if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
 		return true;
 	}
-	return target.isContentEditable;
+	return Boolean(el?.isContentEditable);
 }
 
 export class SwipeTriageView extends ItemView {
@@ -128,26 +131,18 @@ export class SwipeTriageView extends ItemView {
 		};
 
 		const scheduleRefresh = (file: TAbstractFile, oldPath?: string) => {
+			// Ignore the echo of this view's own writes; external changes that land
+			// mid-swipe are kept and retried by reloadDeck once the swipe settles.
 			if (
 				this.selfWriteCount > 0 ||
-				Date.now() < this.suppressAutoRefreshUntil ||
-				this.isAnimating ||
-				this.isPointerDragging
+				Date.now() < this.suppressAutoRefreshUntil
 			) {
 				return;
 			}
 			if (!isRelevantPath(file.path) && !(oldPath && isRelevantPath(oldPath))) {
 				return;
 			}
-			if (this.autoRefreshTimer !== null) {
-				window.clearTimeout(this.autoRefreshTimer);
-			}
-			this.autoRefreshTimer = window.setTimeout(() => {
-				this.autoRefreshTimer = null;
-				if (!this.isAnimating && !this.isPointerDragging && this.selfWriteCount === 0) {
-					void this.reloadDeck(true);
-				}
-			}, 500);
+			this.queueAutoRefresh();
 		};
 
 		this.registerEvent(this.app.vault.on("create", (f) => scheduleRefresh(f)));
@@ -159,6 +154,34 @@ export class SwipeTriageView extends ItemView {
 		this.registerEvent(
 			this.app.metadataCache.on("changed", (f) => scheduleRefresh(f))
 		);
+	}
+
+	/** Debounced background rescan; `reloadDeck` re-queues it while a swipe is landing. */
+	private queueAutoRefresh(): void {
+		if (this.autoRefreshTimer !== null) {
+			window.clearTimeout(this.autoRefreshTimer);
+		}
+		this.autoRefreshTimer = window.setTimeout(() => {
+			this.autoRefreshTimer = null;
+			void this.reloadDeck(true);
+		}, 500);
+	}
+
+	private isMidSwipe(): boolean {
+		return (
+			this.isAnimating || this.isPointerDragging || this.selfWriteCount > 0
+		);
+	}
+
+	/** Everything `render()` draws from, with the queue in canonical order. */
+	private renderSignature(queue: TriageCard[]): string {
+		return JSON.stringify([
+			this.decks,
+			this.activeDeck?.id,
+			this.folderExists,
+			this.zeroCardFiles.map((f) => f.path),
+			sortCards(queue, this.sortMode),
+		]);
 	}
 
 	getActiveDeck(): DeckConfig | null {
@@ -233,34 +256,54 @@ export class SwipeTriageView extends ItemView {
 			this.render();
 		}
 
+		let skipRender = false;
 		try {
 			await this.writeQueue;
-			this.decks = this.plugin.vaultService.getAllDecks(this.plugin.settings);
-
-			const previousId = this.activeDeck?.id;
+			const before = silent ? this.renderSignature(this.queue) : null;
+			const decks = this.plugin.vaultService.getAllDecks(this.plugin.settings);
 			const targetId = this.plugin.settings.activeDeckId;
-			this.activeDeck =
-				this.decks.find((d) => d.id === targetId) ?? this.decks[0] ?? null;
+			const activeDeck =
+				decks.find((d) => d.id === targetId) ?? decks[0] ?? null;
+			const scan = activeDeck
+				? await this.plugin.vaultService.scanDeck(activeDeck)
+				: null;
 
-			if (this.activeDeck && this.activeDeck.id !== previousId) {
-				this.sortMode = this.activeDeck.defaultSort;
-				this.lastPatternWarningKey = "";
+			if (silent && this.isMidSwipe()) {
+				// The scan predates a swipe that is still landing: applying it would
+				// resurrect that card or redraw the deck under the user's finger.
+				skipRender = true;
+				this.queueAutoRefresh();
+				return;
 			}
 
-			if (!this.activeDeck) {
+			if (activeDeck && activeDeck.id !== this.activeDeck?.id) {
+				this.sortMode = activeDeck.defaultSort;
+				this.lastPatternWarningKey = "";
+			}
+			this.decks = decks;
+			this.activeDeck = activeDeck;
+
+			if (!activeDeck || !scan) {
 				this.queue = [];
 				this.zeroCardFiles = [];
 				this.folderExists = false;
 				return;
 			}
 
-			const scan = await this.plugin.vaultService.scanDeck(this.activeDeck);
 			this.folderExists = scan.folderExists;
 			this.zeroCardFiles = scan.zeroCardFiles;
-			this.queue = sortCards(scan.pendingCards, this.sortMode);
+			const nextQueue = sortCards(scan.pendingCards, this.sortMode);
+
+			// A background rescan that found nothing new keeps the current queue and
+			// DOM, so the reader's scroll position and skip order survive it.
+			skipRender =
+				before !== null && before === this.renderSignature(nextQueue);
+			if (!skipRender) {
+				this.queue = nextQueue;
+			}
 
 			if (scan.patternErrors.length > 0) {
-				const warningKey = `${this.activeDeck.id}:${scan.patternErrors.join("|")}`;
+				const warningKey = `${activeDeck.id}:${scan.patternErrors.join("|")}`;
 				if (warningKey !== this.lastPatternWarningKey) {
 					this.lastPatternWarningKey = warningKey;
 					new Notice(`Swipe Triage: ${scan.patternErrors[0]}`, 6000);
@@ -275,7 +318,9 @@ export class SwipeTriageView extends ItemView {
 			this.zeroCardFiles = [];
 		} finally {
 			this.isLoading = false;
-			this.render();
+			if (!skipRender) {
+				this.render();
+			}
 		}
 	}
 
@@ -329,7 +374,8 @@ export class SwipeTriageView extends ItemView {
 			await new Promise((resolve) => window.setTimeout(resolve, 210));
 		}
 
-		this.queue.shift();
+		// By identity, not position: a background refresh may have reordered the queue mid-animation
+		this.queue = this.queue.filter((c) => c.id !== card.id);
 		this.sessionStats[direction]++;
 
 		const pendingUndo: UndoEntry = {
@@ -519,6 +565,8 @@ export class SwipeTriageView extends ItemView {
 	}
 
 	private cleanupPointerHandlers(): void {
+		// The card being dragged is about to be replaced, so its pointerup will never arrive
+		this.isPointerDragging = false;
 		if (this.pointerCleanup) {
 			this.pointerCleanup();
 			this.pointerCleanup = null;
@@ -635,7 +683,6 @@ export class SwipeTriageView extends ItemView {
 			cls: "st-icon-btn",
 			attr: {
 				"aria-label": "Copy AI prompt for this deck",
-				title: "Copy AI prompt & schema for this deck",
 			},
 		});
 		setIcon(promptBtn, "bot");
@@ -647,7 +694,6 @@ export class SwipeTriageView extends ItemView {
 			cls: "st-icon-btn",
 			attr: {
 				"aria-label": "Open source note (O)",
-				title: "Open source note (O)",
 			},
 		});
 		setIcon(openNoteBtn, "file-text");
@@ -659,7 +705,6 @@ export class SwipeTriageView extends ItemView {
 			cls: "st-icon-btn",
 			attr: {
 				"aria-label": "Create new triage folder",
-				title: "Create plug-and-play triage folder",
 			},
 		});
 		setIcon(newFolderBtn, "folder-plus");
@@ -670,7 +715,6 @@ export class SwipeTriageView extends ItemView {
 			cls: "st-icon-btn",
 			attr: {
 				"aria-label": "Refresh deck",
-				title: "Reload pending items",
 			},
 		});
 		setIcon(refreshBtn, "refresh-cw");
@@ -685,7 +729,6 @@ export class SwipeTriageView extends ItemView {
 				cls: "st-icon-btn st-trash-pill-btn",
 				attr: {
 					"aria-label": `Trash ${this.zeroCardFiles.length} empty digest notes`,
-					title: `Trash ${this.zeroCardFiles.length} digest note(s) with 0 cards`,
 				},
 			});
 			setIcon(trashBtn, "trash-2");
@@ -783,7 +826,7 @@ export class SwipeTriageView extends ItemView {
 			const warnBadge = metaRow.createSpan({
 				cls: "st-badge st-badge--warning",
 				attr: {
-					title:
+					"aria-label":
 						card.warningText ||
 						"Source quote could not be verified — treat details with extra caution",
 				},
@@ -872,6 +915,19 @@ export class SwipeTriageView extends ItemView {
 				card.filePath,
 				this.markdownRenderChild
 			);
+			// Rendered wikilinks are inert outside a Markdown view; open them in a new tab
+			mdEl.addEventListener("click", (evt) => {
+				const link = (evt.target as HTMLElement).closest("a.internal-link");
+				const href =
+					link?.getAttribute("data-href") ?? link?.getAttribute("href");
+				if (!href) return;
+				evt.preventDefault();
+				void this.app.workspace.openLinkText(
+					href,
+					card.filePath,
+					Keymap.isModEvent(evt) || "tab"
+				);
+			});
 		} else if (card.extraMarkdown && !isActive) {
 			body.createEl("p", {
 				cls: "st-section-text st-next-preview",
@@ -936,7 +992,6 @@ export class SwipeTriageView extends ItemView {
 				cls: `st-action-btn ${opts.cls}${colorClass}`,
 				attr: {
 					"aria-label": `${opts.label} (${opts.hotkey})`,
-					title: `${opts.label} (${opts.hotkey})`,
 				},
 			});
 			btn.disabled = Boolean(opts.disabled);
@@ -952,7 +1007,7 @@ export class SwipeTriageView extends ItemView {
 			cls: "st-action-btn--undo",
 			icon: "undo-2",
 			label: "Undo",
-			hotkey: "⌘Z",
+			hotkey: Platform.isMacOS ? "⌘Z" : "Ctrl+Z",
 			disabled: this.undoStack.length === 0,
 			onClick: () => void this.undoLastAction(),
 		});
