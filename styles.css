@@ -762,6 +762,32 @@
 	margin-top: 14px;
 }
 
+.st-hidden {
+	display: none;
+}
+
+.st-existing-deck-banner {
+	margin: 10px 0;
+	padding: 10px 12px;
+	border-radius: var(--radius-m);
+	border: 1px solid color-mix(in srgb, var(--color-orange) 45%, var(--background-modifier-border));
+	background: color-mix(in srgb, var(--color-orange) 10%, var(--background-secondary));
+}
+
+.st-existing-deck-title {
+	margin: 0 0 8px;
+	font-weight: 600;
+	color: var(--color-orange);
+	font-size: var(--font-ui-small);
+}
+
+.st-existing-deck-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
 /* ── Mobile / Narrow Pane Ergonomics ─────────────────────────────────────── */
 
 @media (max-width: 600px) {

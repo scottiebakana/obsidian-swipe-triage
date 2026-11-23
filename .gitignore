@@ -3,4 +3,4 @@ main.js
 *.map
 .DS_Store
 npm-debug.log*
-test/.bundle.test.mjs
+test/.bundle*.test.mjs

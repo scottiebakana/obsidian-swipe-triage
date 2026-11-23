@@ -4,10 +4,13 @@ import {
 	MarkdownRenderer,
 	Notice,
 	Scope,
+	TAbstractFile,
 	TFile,
 	WorkspaceLeaf,
+	normalizePath,
 	setIcon,
 } from "obsidian";
+import { DECK_CONFIG_FILENAME } from "./deckConfig";
 import type SwipeTriagePlugin from "./main";
 import {
 	AiPromptModal,
@@ -15,14 +18,15 @@ import {
 	TrashEmptyFilesModal,
 } from "./modals";
 import { sortCards } from "./parser";
-import type {
-	DeckConfig,
-	DirectionColor,
-	SessionStats,
-	SortMode,
-	SwipeDirection,
-	TriageCard,
-	UndoEntry,
+import {
+	StaleDeckError,
+	type DeckConfig,
+	type DirectionColor,
+	type SessionStats,
+	type SortMode,
+	type SwipeDirection,
+	type TriageCard,
+	type UndoEntry,
 } from "./types";
 
 export const VIEW_TYPE_SWIPE_TRIAGE = "swipe-triage-view";
@@ -67,6 +71,11 @@ export class SwipeTriageView extends ItemView {
 	private activeCardEl: HTMLElement | null = null;
 	private nextCardEl: HTMLElement | null = null;
 	private markdownRenderChild: Component | null = null;
+	private selfWriteCount = 0;
+	private suppressAutoRefreshUntil = 0;
+	private autoRefreshTimer: number | null = null;
+	private isPointerDragging = false;
+	private lastPatternWarningKey = "";
 
 	constructor(leaf: WorkspaceLeaf, plugin: SwipeTriagePlugin) {
 		super(leaf);
@@ -87,13 +96,69 @@ export class SwipeTriageView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.registerKeyboardShortcuts();
+		this.registerVaultWatchers();
 		await this.reloadDeck();
 	}
 
 	async onClose(): Promise<void> {
+		if (this.autoRefreshTimer !== null) {
+			window.clearTimeout(this.autoRefreshTimer);
+			this.autoRefreshTimer = null;
+		}
 		this.cleanupPointerHandlers();
 		this.cleanupMarkdownChild();
 		await this.writeQueue;
+	}
+
+	private registerVaultWatchers(): void {
+		const isRelevantPath = (filePath: string): boolean => {
+			if (
+				this.plugin.settings.autoDiscoverDeckFiles &&
+				(filePath === DECK_CONFIG_FILENAME ||
+					filePath.endsWith(`/${DECK_CONFIG_FILENAME}`))
+			) {
+				return true;
+			}
+			if (!this.activeDeck) return false;
+			const folder = normalizePath(this.activeDeck.folderPath.trim());
+			if (!folder || folder === "/") {
+				return !filePath.includes("/");
+			}
+			return filePath.startsWith(`${folder}/`);
+		};
+
+		const scheduleRefresh = (file: TAbstractFile, oldPath?: string) => {
+			if (
+				this.selfWriteCount > 0 ||
+				Date.now() < this.suppressAutoRefreshUntil ||
+				this.isAnimating ||
+				this.isPointerDragging
+			) {
+				return;
+			}
+			if (!isRelevantPath(file.path) && !(oldPath && isRelevantPath(oldPath))) {
+				return;
+			}
+			if (this.autoRefreshTimer !== null) {
+				window.clearTimeout(this.autoRefreshTimer);
+			}
+			this.autoRefreshTimer = window.setTimeout(() => {
+				this.autoRefreshTimer = null;
+				if (!this.isAnimating && !this.isPointerDragging && this.selfWriteCount === 0) {
+					void this.reloadDeck(true);
+				}
+			}, 500);
+		};
+
+		this.registerEvent(this.app.vault.on("create", (f) => scheduleRefresh(f)));
+		this.registerEvent(this.app.vault.on("modify", (f) => scheduleRefresh(f)));
+		this.registerEvent(this.app.vault.on("delete", (f) => scheduleRefresh(f)));
+		this.registerEvent(
+			this.app.vault.on("rename", (f, oldPath) => scheduleRefresh(f, oldPath))
+		);
+		this.registerEvent(
+			this.app.metadataCache.on("changed", (f) => scheduleRefresh(f))
+		);
 	}
 
 	getActiveDeck(): DeckConfig | null {
@@ -162,9 +227,11 @@ export class SwipeTriageView extends ItemView {
 		await this.reloadDeck();
 	}
 
-	async reloadDeck(): Promise<void> {
-		this.isLoading = true;
-		this.render();
+	async reloadDeck(silent = false): Promise<void> {
+		if (!silent) {
+			this.isLoading = true;
+			this.render();
+		}
 
 		try {
 			await this.writeQueue;
@@ -177,6 +244,7 @@ export class SwipeTriageView extends ItemView {
 
 			if (this.activeDeck && this.activeDeck.id !== previousId) {
 				this.sortMode = this.activeDeck.defaultSort;
+				this.lastPatternWarningKey = "";
 			}
 
 			if (!this.activeDeck) {
@@ -190,9 +258,19 @@ export class SwipeTriageView extends ItemView {
 			this.folderExists = scan.folderExists;
 			this.zeroCardFiles = scan.zeroCardFiles;
 			this.queue = sortCards(scan.pendingCards, this.sortMode);
+
+			if (scan.patternErrors.length > 0) {
+				const warningKey = `${this.activeDeck.id}:${scan.patternErrors.join("|")}`;
+				if (warningKey !== this.lastPatternWarningKey) {
+					this.lastPatternWarningKey = warningKey;
+					new Notice(`Swipe Triage: ${scan.patternErrors[0]}`, 6000);
+				}
+			}
 		} catch (err) {
 			console.error("Swipe Triage: failed to scan deck", err);
-			new Notice("Could not scan deck folder. Check console for details.");
+			if (!silent) {
+				new Notice("Could not scan deck folder. Check console for details.");
+			}
 			this.queue = [];
 			this.zeroCardFiles = [];
 		} finally {
@@ -267,6 +345,8 @@ export class SwipeTriageView extends ItemView {
 			appendedSinkHeading: null,
 			appendedSinkLine: null,
 			createdSinkSection: false,
+			changedFileStatus: false,
+			hadPreviousFileStatus: false,
 			previousFileStatus: null,
 			trashed: dirConfig.action === "trash" && deck.mode === "notes",
 		};
@@ -275,6 +355,7 @@ export class SwipeTriageView extends ItemView {
 		this.isAnimating = false;
 		this.render();
 
+		this.selfWriteCount++;
 		this.writeQueue = this.writeQueue
 			.then(async () => {
 				const completedUndo = await this.plugin.vaultService.applySwipe(
@@ -288,8 +369,6 @@ export class SwipeTriageView extends ItemView {
 				}
 			})
 			.catch((err) => {
-				console.error("Swipe Triage: failed to apply swipe", err);
-				new Notice(`Failed to update "${card.title}". Restoring card.`);
 				const idx = this.undoStack.indexOf(pendingUndo);
 				if (idx !== -1) {
 					this.undoStack.splice(idx, 1);
@@ -298,8 +377,23 @@ export class SwipeTriageView extends ItemView {
 					0,
 					this.sessionStats[direction] - 1
 				);
+
+				if (err instanceof StaleDeckError) {
+					new Notice(
+						`"${card.title}" changed or was removed externally. Refreshing deck.`
+					);
+					void this.reloadDeck(true);
+					return;
+				}
+
+				console.error("Swipe Triage: failed to apply swipe", err);
+				new Notice(`Failed to update "${card.title}". Restoring card.`);
 				this.queue.unshift(card);
 				this.render();
+			})
+			.finally(() => {
+				this.selfWriteCount = Math.max(0, this.selfWriteCount - 1);
+				this.suppressAutoRefreshUntil = Date.now() + 700;
 			});
 	}
 
@@ -346,7 +440,13 @@ export class SwipeTriageView extends ItemView {
 				return;
 			}
 
-			await this.plugin.vaultService.undoSwipe(entry);
+			this.selfWriteCount++;
+			try {
+				await this.plugin.vaultService.undoSwipe(entry);
+			} finally {
+				this.selfWriteCount = Math.max(0, this.selfWriteCount - 1);
+				this.suppressAutoRefreshUntil = Date.now() + 700;
+			}
 			this.sessionStats[entry.direction] = Math.max(
 				0,
 				this.sessionStats[entry.direction] - 1
@@ -359,6 +459,13 @@ export class SwipeTriageView extends ItemView {
 			const suffix = extras.length > 0 ? ` (${extras.join(", ")})` : "";
 			new Notice(`Undid "${entry.directionConfig.label}"${suffix}.`);
 		} catch (err) {
+			if (err instanceof StaleDeckError) {
+				new Notice(
+					"Could not undo because the source note or card changed externally. Refreshing deck."
+				);
+				void this.reloadDeck(true);
+				return;
+			}
 			console.error("Swipe Triage: undo failed", err);
 			new Notice("Failed to undo last action. Check console for details.");
 		} finally {
@@ -372,6 +479,11 @@ export class SwipeTriageView extends ItemView {
 		try {
 			await this.plugin.vaultService.openCardSourceNote(this.queue[0]);
 		} catch (err) {
+			if (err instanceof StaleDeckError) {
+				new Notice("Source note no longer exists. Refreshing deck.");
+				void this.reloadDeck(true);
+				return;
+			}
 			console.error("Swipe Triage: could not open note", err);
 			new Notice("Could not open source note.");
 		}
@@ -1061,6 +1173,7 @@ export class SwipeTriageView extends ItemView {
 				}
 
 				mode = "swipe";
+				this.isPointerDragging = true;
 				cardEl.addClass("is-dragging");
 				try {
 					cardEl.setPointerCapture(pointerId);
@@ -1126,6 +1239,7 @@ export class SwipeTriageView extends ItemView {
 			const finishedMode = mode;
 			pointerId = null;
 			mode = "undecided";
+			this.isPointerDragging = false;
 
 			try {
 				if (cardEl.hasPointerCapture(activeId)) {

@@ -1,7 +1,11 @@
 import { App, Modal, Notice, Setting, TFile } from "obsidian";
 import { generateAiPrompt } from "./deckConfig";
 import { PRESET_LIST } from "./presets";
-import type { DeckConfig, PresetId } from "./types";
+import {
+	DeckAlreadyExistsError,
+	type DeckConfig,
+	type PresetId,
+} from "./types";
 import type { SwipeTriageVaultService } from "./vaultService";
 
 export class CreateTriageFolderModal extends Modal {
@@ -11,6 +15,7 @@ export class CreateTriageFolderModal extends Modal {
 	private folderPath = PRESET_LIST[0].defaultFolder;
 	private deckName = PRESET_LIST[0].name;
 	private includeSamples = true;
+	private overwriteExisting = false;
 
 	constructor(
 		app: App,
@@ -27,9 +32,7 @@ export class CreateTriageFolderModal extends Modal {
 		contentEl.empty();
 		contentEl.addClass("st-modal");
 
-		new Setting(contentEl)
-			.setName("Create triage folder")
-			.setHeading();
+		new Setting(contentEl).setName("Create triage folder").setHeading();
 
 		contentEl.createEl("p", {
 			cls: "st-modal-desc",
@@ -39,6 +42,80 @@ export class CreateTriageFolderModal extends Modal {
 		let folderInputEl: HTMLInputElement | null = null;
 		let nameInputEl: HTMLInputElement | null = null;
 		let presetDescEl: HTMLElement | null = null;
+		let createBtnEl: HTMLButtonElement | null = null;
+		let existingNoticeEl: HTMLElement | null = null;
+
+		const updateExistingDeckState = () => {
+			if (!existingNoticeEl || !createBtnEl) return;
+			existingNoticeEl.empty();
+			const existingFile = this.vaultService.getExistingDeckFile(
+				this.folderPath
+			);
+
+			if (!existingFile) {
+				existingNoticeEl.addClass("st-hidden");
+				this.overwriteExisting = false;
+				createBtnEl.disabled = false;
+				createBtnEl.setText("Create folder");
+				return;
+			}
+
+			existingNoticeEl.removeClass("st-hidden");
+			existingNoticeEl.createEl("p", {
+				cls: "st-existing-deck-title",
+				text: `Existing deck found at ${existingFile.path}.`,
+			});
+
+			const existingActions = existingNoticeEl.createDiv({
+				cls: "st-existing-deck-actions",
+			});
+
+			const openBtn = existingActions.createEl("button", {
+				text: "Open existing _deck.md",
+			});
+			openBtn.addEventListener("click", () => {
+				void this.vaultService
+					.openFileByPath(existingFile.path)
+					.then(() => this.close())
+					.catch(() => new Notice("Could not open existing _deck.md."));
+			});
+
+			const existingDeck = this.vaultService.getExistingDeckConfig(
+				this.folderPath
+			);
+			if (existingDeck) {
+				const useBtn = existingActions.createEl("button", {
+					text: "Use existing deck",
+					cls: "mod-cta",
+				});
+				useBtn.addEventListener("click", () => {
+					this.close();
+					this.onCreated?.(existingDeck);
+				});
+			}
+
+			new Setting(existingNoticeEl)
+				.setName("Overwrite existing _deck.md")
+				.setDesc(
+					"Replace the existing configuration file with the selected preset."
+				)
+				.addToggle((toggle) => {
+					toggle.setValue(this.overwriteExisting).onChange((value) => {
+						this.overwriteExisting = value;
+						if (createBtnEl) {
+							createBtnEl.disabled = !value;
+							createBtnEl.setText(
+								value ? "Overwrite _deck.md" : "Create folder"
+							);
+						}
+					});
+				});
+
+			createBtnEl.disabled = !this.overwriteExisting;
+			createBtnEl.setText(
+				this.overwriteExisting ? "Overwrite _deck.md" : "Create folder"
+			);
+		};
 
 		const presetSetting = new Setting(contentEl)
 			.setName("Starter preset")
@@ -66,6 +143,8 @@ export class CreateTriageFolderModal extends Modal {
 							presetDescEl.setText(nextMeta.description);
 						}
 					}
+					this.overwriteExisting = false;
+					updateExistingDeckState();
 				});
 			});
 		presetDescEl = presetSetting.descEl;
@@ -80,8 +159,14 @@ export class CreateTriageFolderModal extends Modal {
 					.setValue(this.folderPath)
 					.onChange((value) => {
 						this.folderPath = value.trim();
+						this.overwriteExisting = false;
+						updateExistingDeckState();
 					});
 			});
+
+		existingNoticeEl = contentEl.createDiv({
+			cls: "st-existing-deck-banner st-hidden",
+		});
 
 		new Setting(contentEl)
 			.setName("Deck name")
@@ -113,9 +198,12 @@ export class CreateTriageFolderModal extends Modal {
 			text: "Create folder",
 			cls: "mod-cta",
 		});
+		createBtnEl = createBtn;
 		createBtn.addEventListener("click", () => {
 			void this.handleCreate(createBtn);
 		});
+
+		updateExistingDeckState();
 	}
 
 	private async handleCreate(btn: HTMLButtonElement): Promise<void> {
@@ -130,12 +218,21 @@ export class CreateTriageFolderModal extends Modal {
 				this.folderPath,
 				this.preset,
 				this.deckName,
-				this.includeSamples
+				this.includeSamples,
+				this.overwriteExisting
 			);
 			new Notice(`Created triage folder "${deck.folderPath}".`);
 			this.close();
 			this.onCreated?.(deck);
 		} catch (err) {
+			if (err instanceof DeckAlreadyExistsError) {
+				new Notice(
+					"This folder already has _deck.md. Enable overwrite to replace it."
+				);
+				btn.disabled = true;
+				btn.setText("Create folder");
+				return;
+			}
 			console.error("Swipe Triage: failed to scaffold folder", err);
 			new Notice("Could not create triage folder. Check console for details.");
 			btn.disabled = false;

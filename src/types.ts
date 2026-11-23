@@ -16,6 +16,31 @@ export type SortMode = "newest" | "score";
 
 export type PresetId = "inbox" | "ai-digest" | "reading-queue";
 
+export type StaleDeckReason =
+	| "missing-file"
+	| "card-not-found"
+	| "card-ambiguous";
+
+export class StaleDeckError extends Error {
+	readonly reason: StaleDeckReason;
+
+	constructor(reason: StaleDeckReason, message: string) {
+		super(message);
+		this.name = "StaleDeckError";
+		this.reason = reason;
+	}
+}
+
+export class DeckAlreadyExistsError extends Error {
+	readonly deckFilePath: string;
+
+	constructor(deckFilePath: string) {
+		super(`Deck configuration already exists at ${deckFilePath}.`);
+		this.name = "DeckAlreadyExistsError";
+		this.deckFilePath = deckFilePath;
+	}
+}
+
 export interface DirectionConfig {
 	label: string;
 	verdict: string;
@@ -55,6 +80,7 @@ export interface TriageCard {
 	cardNumber: number | null;
 	headingRaw: string;
 	headingSubpath: string;
+	bodyFingerprint: string;
 	title: string;
 	score: number | null;
 	seenInMultipleSources: boolean;
@@ -104,6 +130,8 @@ export interface SwipeUndoEntry {
 	appendedSinkHeading: string | null;
 	appendedSinkLine: string | null;
 	createdSinkSection: boolean;
+	changedFileStatus: boolean;
+	hadPreviousFileStatus: boolean;
 	previousFileStatus: string | null;
 	trashed: boolean;
 }

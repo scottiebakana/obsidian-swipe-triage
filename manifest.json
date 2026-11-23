@@ -1,7 +1,7 @@
 {
   "id": "swipe-triage",
   "name": "Swipe Triage",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.6.6",
   "description": "Turn any folder of notes or multi-card Markdown digests into a mobile-friendly swipe deck for fast human and AI-assisted triage.",
   "author": "Scott Cragun",

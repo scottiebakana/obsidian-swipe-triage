@@ -1,8 +1,9 @@
-import type {
-	DeckConfig,
-	ParsedDigestFile,
-	SortMode,
-	TriageCard,
+import {
+	StaleDeckError,
+	type DeckConfig,
+	type ParsedDigestFile,
+	type SortMode,
+	type TriageCard,
 } from "./types";
 
 interface LineToken {
@@ -56,7 +57,77 @@ function buildVerdictRegex(verdictField: string): RegExp {
 }
 
 /**
+ * Returns a boolean array marking every line that sits inside (or opens/closes)
+ * a Markdown fenced code block (``` or ~~~) so headings inside code never split cards.
+ */
+function computeCodeFenceFlags(lines: LineToken[]): boolean[] {
+	const flags: boolean[] = new Array<boolean>(lines.length).fill(false);
+	let activeChar: "`" | "~" | null = null;
+	let activeLen = 0;
+
+	for (let i = 0; i < lines.length; i++) {
+		const trimmed = lines[i].text.trimStart();
+		if (activeChar === null) {
+			const openMatch = /^(`{3,}|~{3,})/.exec(trimmed);
+			if (openMatch) {
+				const seq = openMatch[1];
+				const ch = seq[0] as "`" | "~";
+				// Backtick info strings cannot contain backticks per CommonMark
+				const rest = trimmed.slice(seq.length);
+				if (ch === "~" || !rest.includes("`")) {
+					activeChar = ch;
+					activeLen = seq.length;
+					flags[i] = true;
+				}
+			}
+		} else {
+			flags[i] = true;
+			const closeRe = new RegExp(`^${activeChar}{${activeLen},}\\s*$`);
+			if (closeRe.test(trimmed)) {
+				activeChar = null;
+				activeLen = 0;
+			}
+		}
+	}
+
+	return flags;
+}
+
+/**
+ * Validates a deck's include and exclude regex patterns, returning any error messages.
+ */
+export function validateDeckPatterns(
+	deck: Pick<DeckConfig, "filePattern" | "excludePattern">
+): string[] {
+	const errors: string[] = [];
+	if (deck.filePattern.trim()) {
+		try {
+			new RegExp(deck.filePattern.trim(), "i");
+		} catch (err) {
+			errors.push(
+				`Invalid file_pattern regex "${deck.filePattern}": ${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
+		}
+	}
+	if (deck.excludePattern.trim()) {
+		try {
+			new RegExp(deck.excludePattern.trim(), "i");
+		} catch (err) {
+			errors.push(
+				`Invalid exclude_pattern regex "${deck.excludePattern}": ${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
+		}
+	}
+	return errors;
+}
+
+/**
  * Checks whether a filename matches a deck's include and exclude regex patterns.
+ * Fails closed (returns false) if `filePattern` is malformed so typos never flood the deck.
  */
 export function matchesDeckFileFilters(
 	fileName: string,
@@ -69,7 +140,7 @@ export function matchesDeckFileFilters(
 				return false;
 			}
 		} catch {
-			// Ignore malformed user regex rather than crashing the view
+			// Malformed excludePattern is surfaced via validateDeckPatterns
 		}
 	}
 
@@ -78,7 +149,7 @@ export function matchesDeckFileFilters(
 			const includeRe = new RegExp(deck.filePattern.trim(), "i");
 			return includeRe.test(fileName);
 		} catch {
-			return true;
+			return false;
 		}
 	}
 
@@ -117,6 +188,24 @@ interface RawCardSlice {
 	headingRaw: string;
 	verdictLineIndex: number;
 	verdictValue: string;
+	bodyFingerprint: string;
+}
+
+function computeSliceFingerprint(
+	lines: LineToken[],
+	startLine: number,
+	endLine: number,
+	verdictLineIndex: number
+): string {
+	const parts: string[] = [];
+	for (let i = startLine + 1; i < endLine && parts.length < 3; i++) {
+		if (i === verdictLineIndex) continue;
+		const t = lines[i].text.trim();
+		if (t) {
+			parts.push(t);
+		}
+	}
+	return parts.join(" | ").slice(0, 160);
 }
 
 function findCardSlices(
@@ -125,13 +214,14 @@ function findCardSlices(
 	verdictField: string
 ): RawCardSlice[] {
 	const bodyStart = findBodyStartLine(lines);
+	const fenced = computeCodeFenceFlags(lines);
 	const headingPrefix = "#".repeat(headingLevel);
 	const headingRe = new RegExp(`^${headingPrefix}\\s+`);
 	const verdictRe = buildVerdictRegex(verdictField);
 
 	const headingIndices: number[] = [];
 	for (let i = bodyStart; i < lines.length; i++) {
-		if (headingRe.test(lines[i].text)) {
+		if (!fenced[i] && headingRe.test(lines[i].text)) {
 			headingIndices.push(i);
 		}
 	}
@@ -145,6 +235,7 @@ function findCardSlices(
 		let verdictLineIndex = -1;
 		let verdictValue = "";
 		for (let i = startLine + 1; i < endLine; i++) {
+			if (fenced[i]) continue;
 			const match = verdictRe.exec(lines[i].text.trim());
 			if (match) {
 				verdictLineIndex = i;
@@ -160,6 +251,12 @@ function findCardSlices(
 				headingRaw: lines[startLine].text.trim(),
 				verdictLineIndex,
 				verdictValue,
+				bodyFingerprint: computeSliceFingerprint(
+					lines,
+					startLine,
+					endLine,
+					verdictLineIndex
+				),
 			});
 		}
 	}
@@ -237,6 +334,7 @@ export function parseDigestFile(
 	const date = extractDateFromFileName(fileName) || fallbackDate;
 	const fileBasename = fileName.replace(/\.md$/i, "");
 	const lines = splitLinesPreservingEol(content);
+	const fenced = computeCodeFenceFlags(lines);
 	const slices = findCardSlices(lines, deck.headingLevel, deck.verdictField);
 	const verdictRe = buildVerdictRegex(deck.verdictField);
 	const headingStripRe = new RegExp(`^#{${deck.headingLevel}}\\s+`);
@@ -285,6 +383,13 @@ export function parseDigestFile(
 			const trimmed = rawLine.trim();
 
 			if (i === slice.verdictLineIndex) {
+				i++;
+				continue;
+			}
+
+			// Lines inside fenced code blocks always belong to extraMarkdown verbatim
+			if (fenced[i]) {
+				extraLines.push(rawLine);
 				i++;
 				continue;
 			}
@@ -352,6 +457,7 @@ export function parseDigestFile(
 				const parts = whatMatch[1].trim() ? [whatMatch[1].trim()] : [];
 				i++;
 				while (i < slice.endLine) {
+					if (fenced[i]) break;
 					const next = lines[i].text.trim();
 					if (!next || isKnownFieldStart(next, verdictRe)) break;
 					parts.push(next);
@@ -368,6 +474,7 @@ export function parseDigestFile(
 				const parts = whyMatch[1].trim() ? [whyMatch[1].trim()] : [];
 				i++;
 				while (i < slice.endLine) {
+					if (fenced[i]) break;
 					const next = lines[i].text.trim();
 					if (!next || isKnownFieldStart(next, verdictRe)) break;
 					parts.push(next);
@@ -386,6 +493,7 @@ export function parseDigestFile(
 				}
 				i++;
 				while (i < slice.endLine) {
+					if (fenced[i]) break;
 					const next = lines[i].text.trim();
 					if (!next) {
 						i++;
@@ -432,7 +540,6 @@ export function parseDigestFile(
 				continue;
 			}
 
-			// Any custom or free-form markdown lines inside the card
 			extraLines.push(rawLine);
 			i++;
 		}
@@ -453,6 +560,7 @@ export function parseDigestFile(
 			cardNumber,
 			headingRaw: slice.headingRaw,
 			headingSubpath,
+			bodyFingerprint: slice.bodyFingerprint,
 			title,
 			score,
 			seenInMultipleSources,
@@ -559,9 +667,7 @@ export function parseNoteCard(
 	const verdictLower = rawVerdict.toLowerCase();
 	const pendingTarget = deck.pendingValue.trim().toLowerCase();
 
-	// In note-per-card mode, missing/empty verdict OR matching pendingValue is pending
-	const isPending =
-		verdictLower === "" || verdictLower === pendingTarget;
+	const isPending = verdictLower === "" || verdictLower === pendingTarget;
 	if (!isPending) {
 		return null;
 	}
@@ -604,12 +710,10 @@ export function parseNoteCard(
 
 	const tags = asTags(getFrontmatterValue(frontmatter, ["tags", "tag"]));
 
-	// Extract body markdown after frontmatter
 	const lines = splitLinesPreservingEol(content);
 	const bodyStart = findBodyStartLine(lines);
 	const bodyLines = lines.slice(bodyStart).map((l) => l.text);
 
-	// Skip leading blank lines and an H1 that duplicates the note title
 	let firstIdx = 0;
 	while (firstIdx < bodyLines.length && bodyLines[firstIdx].trim() === "") {
 		firstIdx++;
@@ -639,6 +743,7 @@ export function parseNoteCard(
 		cardNumber: null,
 		headingRaw: "",
 		headingSubpath: "",
+		bodyFingerprint: "",
 		title,
 		score,
 		seenInMultipleSources: false,
@@ -669,34 +774,76 @@ export interface VerdictUpdateResult {
 /**
  * Updates ONLY the targeted card's verdict line in place (`cards` mode),
  * preserving line endings (CRLF/LF) and every other byte of the file.
+ *
+ * Refuses to fall back blindly to positional `cardIndex`: if the heading was
+ * removed or renamed externally, throws `StaleDeckError` so a neighboring card
+ * never receives the wrong verdict.
  */
 export function updateCardVerdictInContent(
 	content: string,
-	target: Pick<TriageCard, "headingRaw" | "cardIndex">,
+	target: Pick<TriageCard, "headingRaw" | "cardIndex"> & {
+		bodyFingerprint?: string;
+	},
 	newVerdict: string,
 	deck: Pick<DeckConfig, "headingLevel" | "verdictField" | "pendingValue">
 ): VerdictUpdateResult {
 	const lines = splitLinesPreservingEol(content);
 	const slices = findCardSlices(lines, deck.headingLevel, deck.verdictField);
 
-	let slice = slices.find(
-		(s, idx) => s.headingRaw === target.headingRaw && idx === target.cardIndex
-	);
-	if (!slice) {
-		slice = slices.find((s) => s.headingRaw === target.headingRaw);
-	}
-	if (!slice && target.cardIndex >= 0 && target.cardIndex < slices.length) {
-		slice = slices[target.cardIndex];
-	}
+	const headingMatches = slices
+		.map((s, idx) => ({ slice: s, idx }))
+		.filter(({ slice }) => slice.headingRaw === target.headingRaw);
 
-	if (!slice) {
-		throw new Error(
-			`Could not locate card "${target.headingRaw}" while updating verdict.`
+	if (headingMatches.length === 0) {
+		throw new StaleDeckError(
+			"card-not-found",
+			`Card "${target.headingRaw}" no longer exists in the file.`
 		);
 	}
 
-	const previousVerdict = slice.verdictValue;
-	const targetLine = lines[slice.verdictLineIndex];
+	let matchedSlice: RawCardSlice;
+	if (headingMatches.length === 1) {
+		const single = headingMatches[0].slice;
+		if (
+			target.bodyFingerprint &&
+			single.bodyFingerprint &&
+			single.bodyFingerprint !== target.bodyFingerprint
+		) {
+			throw new StaleDeckError(
+				"card-ambiguous",
+				`Card "${target.headingRaw}" was modified externally.`
+			);
+		}
+		matchedSlice = single;
+	} else {
+		// Multiple cards share the exact same heading: require fingerprint or exact position+fingerprint match
+		const byFingerprint = target.bodyFingerprint
+			? headingMatches.filter(
+					({ slice }) => slice.bodyFingerprint === target.bodyFingerprint
+			  )
+			: [];
+
+		if (byFingerprint.length === 1) {
+			matchedSlice = byFingerprint[0].slice;
+		} else {
+			const atIndex = headingMatches.find(
+				({ idx, slice }) =>
+					idx === target.cardIndex &&
+					(!target.bodyFingerprint ||
+						slice.bodyFingerprint === target.bodyFingerprint)
+			);
+			if (!atIndex) {
+				throw new StaleDeckError(
+					"card-ambiguous",
+					`Multiple cards share heading "${target.headingRaw}" and the original card could not be uniquely identified.`
+				);
+			}
+			matchedSlice = atIndex.slice;
+		}
+	}
+
+	const previousVerdict = matchedSlice.verdictValue;
+	const targetLine = lines[matchedSlice.verdictLineIndex];
 	const prefixMatch = /^(\s*\*\*[^*]+:\*\*)/.exec(targetLine.text);
 	const labelPrefix = prefixMatch
 		? prefixMatch[1]
@@ -704,7 +851,7 @@ export function updateCardVerdictInContent(
 	const nextLineText = `${labelPrefix} ${newVerdict}`;
 	const changed = targetLine.text !== nextLineText;
 
-	lines[slice.verdictLineIndex] = {
+	lines[matchedSlice.verdictLineIndex] = {
 		text: nextLineText,
 		eol: targetLine.eol,
 	};
@@ -713,7 +860,7 @@ export function updateCardVerdictInContent(
 	let remainingPendingCount = 0;
 	for (const s of slices) {
 		const val =
-			s === slice
+			s === matchedSlice
 				? newVerdict.trim().toLowerCase()
 				: s.verdictValue.toLowerCase();
 		if (val === pendingTarget || val === "") {
@@ -765,6 +912,12 @@ export function formatSinkEntry(
 	return parts.join(" ");
 }
 
+function getHeadingBoundaryRegex(sectionHeading: string): RegExp {
+	const match = /^(#{1,6})\s+/.exec(sectionHeading.trim());
+	const level = match ? match[1].length : 2;
+	return new RegExp(`^#{1,${level}}\\s+`);
+}
+
 export interface AppendSinkResult {
 	updatedContent: string;
 	createdSection: boolean;
@@ -773,7 +926,7 @@ export interface AppendSinkResult {
 
 /**
  * Appends a checklist item under the configured heading in a sink note,
- * creating the section cleanly at the end of the file if missing.
+ * respecting the heading's own Markdown level (and ignoring fenced code blocks).
  */
 export function appendSinkEntry(
 	content: string,
@@ -784,10 +937,12 @@ export function appendSinkEntry(
 	const normalizedHeading = sectionHeading.trim() || "## Saved items";
 	const normalizedEntry = entryLine.trim();
 	const lines = splitLinesPreservingEol(content);
+	const fenced = computeCodeFenceFlags(lines);
+	const boundaryRe = getHeadingBoundaryRegex(normalizedHeading);
 
 	let sectionIdx = -1;
 	for (let i = 0; i < lines.length; i++) {
-		if (lines[i].text.trim() === normalizedHeading) {
+		if (!fenced[i] && lines[i].text.trim() === normalizedHeading) {
 			sectionIdx = i;
 			break;
 		}
@@ -811,7 +966,7 @@ export function appendSinkEntry(
 
 	let sectionEnd = lines.length;
 	for (let i = sectionIdx + 1; i < lines.length; i++) {
-		if (/^##\s+/.test(lines[i].text.trim())) {
+		if (!fenced[i] && boundaryRe.test(lines[i].text.trim())) {
 			sectionEnd = i;
 			break;
 		}
@@ -854,7 +1009,7 @@ export function appendSinkEntry(
 }
 
 /**
- * Reverses `appendSinkEntry` during Undo.
+ * Reverses `appendSinkEntry` during Undo, respecting heading level and code fences.
  */
 export function removeSinkEntry(
 	content: string,
@@ -865,10 +1020,12 @@ export function removeSinkEntry(
 	const normalizedHeading = sectionHeading.trim() || "## Saved items";
 	const normalizedEntry = entryLine.trim();
 	const lines = splitLinesPreservingEol(content);
+	const fenced = computeCodeFenceFlags(lines);
+	const boundaryRe = getHeadingBoundaryRegex(normalizedHeading);
 
 	let sectionIdx = -1;
 	for (let i = 0; i < lines.length; i++) {
-		if (lines[i].text.trim() === normalizedHeading) {
+		if (!fenced[i] && lines[i].text.trim() === normalizedHeading) {
 			sectionIdx = i;
 			break;
 		}
@@ -879,7 +1036,7 @@ export function removeSinkEntry(
 
 	let sectionEnd = lines.length;
 	for (let i = sectionIdx + 1; i < lines.length; i++) {
-		if (/^##\s+/.test(lines[i].text.trim())) {
+		if (!fenced[i] && boundaryRe.test(lines[i].text.trim())) {
 			sectionEnd = i;
 			break;
 		}
