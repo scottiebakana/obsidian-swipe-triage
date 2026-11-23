@@ -12,7 +12,7 @@ export const PRESET_LIST: PresetMetadata[] = [
 		id: "inbox",
 		name: "Inbox triage",
 		description:
-			"One note per card. Dump notes into a folder and swipe to keep, archive, defer to someday, or trash.",
+			"One note per card. Dump notes into a folder and swipe to keep, archive, defer to someday, or dismiss (all reversible with Undo).",
 		defaultFolder: "Triage-Inbox",
 	},
 	{
@@ -26,7 +26,7 @@ export const PRESET_LIST: PresetMetadata[] = [
 		id: "reading-queue",
 		name: "Reading queue",
 		description:
-			"One note per article or bookmark. Swipe to star, mark read, save for later, or drop.",
+			"One note per article or bookmark. Swipe to star, mark read, save for later, or move to Dropped.",
 		defaultFolder: "Reading-Queue",
 	},
 ];
@@ -115,7 +115,8 @@ export function createDeckFromPreset(
 					label: "Drop",
 					verdict: "dropped",
 					color: "red",
-					action: "trash",
+					action: "move",
+					targetFolder: joinVaultPath(folder, "Dropped"),
 				},
 				down: {
 					label: "Later",
@@ -142,7 +143,7 @@ export function createDeckFromPreset(
 		};
 	}
 
-	// Default: inbox
+	// Default: inbox (all 4 directions are reversible moves so accidental swipes can always be undone)
 	return {
 		id,
 		name: nameOverride?.trim() || "Inbox triage",
@@ -158,10 +159,11 @@ export function createDeckFromPreset(
 		source: "settings",
 		directions: {
 			left: {
-				label: "Trash",
-				verdict: "trash",
+				label: "Dismiss",
+				verdict: "dismissed",
 				color: "red",
-				action: "trash",
+				action: "move",
+				targetFolder: joinVaultPath(folder, "Dismissed"),
 			},
 			down: {
 				label: "Someday",

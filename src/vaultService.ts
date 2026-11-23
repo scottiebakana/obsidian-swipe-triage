@@ -13,15 +13,18 @@ import {
 	parseNoteCard,
 	removeSinkEntry,
 	updateCardVerdictInContent,
+	validateDeckPatterns,
 } from "./parser";
 import { createDeckFromPreset } from "./presets";
-import type {
-	DeckConfig,
-	PresetId,
-	SwipeDirection,
-	SwipeTriageSettings,
-	SwipeUndoEntry,
-	TriageCard,
+import {
+	DeckAlreadyExistsError,
+	StaleDeckError,
+	type DeckConfig,
+	type PresetId,
+	type SwipeDirection,
+	type SwipeTriageSettings,
+	type SwipeUndoEntry,
+	type TriageCard,
 } from "./types";
 
 export interface DeckScanResult {
@@ -29,6 +32,7 @@ export interface DeckScanResult {
 	zeroCardFiles: TFile[];
 	totalCardCount: number;
 	folderExists: boolean;
+	patternErrors: string[];
 }
 
 export class SwipeTriageVaultService {
@@ -65,7 +69,6 @@ export class SwipeTriageVaultService {
 		const result: DeckConfig[] = [];
 		const seenFolders = new Set<string>();
 
-		// Settings decks first (upgraded with _deck.md override if present)
 		for (const deck of settings.decks) {
 			const normFolder = normalizePath(deck.folderPath.trim());
 			const discovered = discoveredByFolder.get(normFolder);
@@ -78,7 +81,6 @@ export class SwipeTriageVaultService {
 			}
 		}
 
-		// Any additional auto-discovered _deck.md folders not listed in settings
 		for (const [normFolder, deck] of discoveredByFolder.entries()) {
 			if (!seenFolders.has(normFolder)) {
 				result.push(deck);
@@ -89,9 +91,32 @@ export class SwipeTriageVaultService {
 	}
 
 	/**
-	 * Collects all sink note paths configured by a deck so we never show
-	 * the deck's own saved/favorites file as a swipeable card.
+	 * Returns the existing `_deck.md` TFile for a folder path, or null if none exists.
 	 */
+	getExistingDeckFile(folderPath: string): TFile | null {
+		const cleaned = folderPath.trim().replace(/^\/+|\/+$/g, "");
+		const deckPath = cleaned
+			? normalizePath(`${cleaned}/${DECK_CONFIG_FILENAME}`)
+			: DECK_CONFIG_FILENAME;
+		const existing = this.app.vault.getAbstractFileByPath(deckPath);
+		return existing instanceof TFile ? existing : null;
+	}
+
+	/**
+	 * Reads and parses an existing `_deck.md` inside `folderPath` if valid.
+	 */
+	getExistingDeckConfig(folderPath: string): DeckConfig | null {
+		const deckFile = this.getExistingDeckFile(folderPath);
+		if (!deckFile) return null;
+		const cache = this.app.metadataCache.getFileCache(deckFile);
+		const cleaned = folderPath.trim().replace(/^\/+|\/+$/g, "");
+		return parseDeckConfigFromFrontmatter(
+			cache?.frontmatter,
+			cleaned,
+			deckFile.path
+		);
+	}
+
 	private getExcludedSinkPaths(deck: DeckConfig): Set<string> {
 		const paths = new Set<string>();
 		const dirs: SwipeDirection[] = ["left", "down", "right", "up"];
@@ -105,9 +130,11 @@ export class SwipeTriageVaultService {
 	}
 
 	/**
-	 * Scans a deck's folder and returns all pending cards and any 0-card digest files.
+	 * Scans a deck's folder and returns all pending cards, 0-card digest files,
+	 * and any pattern validation errors.
 	 */
 	async scanDeck(deck: DeckConfig): Promise<DeckScanResult> {
+		const patternErrors = validateDeckPatterns(deck);
 		const cleanedFolder = deck.folderPath.trim().replace(/^\/+|\/+$/g, "");
 		const abstract = cleanedFolder
 			? this.app.vault.getAbstractFileByPath(normalizePath(cleanedFolder))
@@ -119,6 +146,7 @@ export class SwipeTriageVaultService {
 				zeroCardFiles: [],
 				totalCardCount: 0,
 				folderExists: false,
+				patternErrors,
 			};
 		}
 
@@ -184,11 +212,13 @@ export class SwipeTriageVaultService {
 			zeroCardFiles,
 			totalCardCount,
 			folderExists: true,
+			patternErrors,
 		};
 	}
 
 	/**
 	 * Applies a swipe direction's action to the card and returns an UndoEntry.
+	 * Rolls back partial writes if a downstream destination step (move or sink append) fails.
 	 */
 	async applySwipe(
 		deck: DeckConfig,
@@ -197,7 +227,10 @@ export class SwipeTriageVaultService {
 	): Promise<SwipeUndoEntry> {
 		const abstract = this.app.vault.getAbstractFileByPath(card.filePath);
 		if (!(abstract instanceof TFile)) {
-			throw new Error(`Note not found: ${card.filePath}`);
+			throw new StaleDeckError(
+				"missing-file",
+				`Source note no longer exists at "${card.filePath}".`
+			);
 		}
 
 		if (deck.mode === "cards") {
@@ -213,7 +246,8 @@ export class SwipeTriageVaultService {
 		direction: SwipeDirection
 	): Promise<SwipeUndoEntry> {
 		const dirConfig = deck.directions[direction];
-		const verdictValue = dirConfig.verdict.trim() || dirConfig.label.toLowerCase();
+		const verdictValue =
+			dirConfig.verdict.trim() || dirConfig.label.toLowerCase();
 
 		let previousVerdict = card.verdict;
 		let remainingPendingCount = 1;
@@ -230,56 +264,98 @@ export class SwipeTriageVaultService {
 			return result.updatedContent;
 		});
 
+		let changedFileStatus = false;
+		let hadPreviousFileStatus = false;
 		let previousFileStatus: string | null = null;
-		if (remainingPendingCount === 0 && deck.reviewedStatus.trim()) {
-			const nextStatus = deck.reviewedStatus.trim();
-			await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-				const current = fm.status;
-				if (
-					current === "new" ||
-					current === "active" ||
-					current === undefined
-				) {
-					previousFileStatus = typeof current === "string" ? current : "new";
-					fm.status = nextStatus;
-				}
-			});
-		}
 
-		let appendedSinkNotePath: string | null = null;
-		let appendedSinkHeading: string | null = null;
-		let appendedSinkLine: string | null = null;
-		let createdSinkSection = false;
-
-		if (dirConfig.action === "append-note" && dirConfig.targetNote?.trim()) {
-			const sinkPath = normalizePath(dirConfig.targetNote.trim());
-			const heading = dirConfig.targetHeading?.trim() || "## Saved items";
-			const entryLine = formatSinkEntry(card);
-			const res = await this.appendToSinkNote(sinkPath, heading, entryLine);
-			if (!res.alreadyPresent) {
-				appendedSinkNotePath = sinkPath;
-				appendedSinkHeading = heading;
-				appendedSinkLine = entryLine;
-				createdSinkSection = res.createdSection;
+		try {
+			if (remainingPendingCount === 0 && deck.reviewedStatus.trim()) {
+				const nextStatus = deck.reviewedStatus.trim();
+				await this.app.fileManager.processFrontMatter(
+					file,
+					(fm: Record<string, unknown>) => {
+						const hasStatus = "status" in fm && fm.status !== undefined;
+						const current = fm.status;
+						if (!hasStatus || current === "new" || current === "active") {
+							changedFileStatus = true;
+							hadPreviousFileStatus = hasStatus;
+							previousFileStatus =
+								typeof current === "string" ? current : null;
+							fm.status = nextStatus;
+						}
+					}
+				);
 			}
-		}
 
-		return {
-			kind: "swipe",
-			deck,
-			direction,
-			directionConfig: dirConfig,
-			card: { ...card, verdict: previousVerdict },
-			previousVerdict,
-			hadPreviousVerdictProp: true,
-			movedToPath: null,
-			appendedSinkNotePath,
-			appendedSinkHeading,
-			appendedSinkLine,
-			createdSinkSection,
-			previousFileStatus,
-			trashed: false,
-		};
+			let appendedSinkNotePath: string | null = null;
+			let appendedSinkHeading: string | null = null;
+			let appendedSinkLine: string | null = null;
+			let createdSinkSection = false;
+
+			if (dirConfig.action === "append-note" && dirConfig.targetNote?.trim()) {
+				const sinkPath = normalizePath(dirConfig.targetNote.trim());
+				const heading = dirConfig.targetHeading?.trim() || "## Saved items";
+				const entryLine = formatSinkEntry(card);
+				const res = await this.appendToSinkNote(sinkPath, heading, entryLine);
+				if (!res.alreadyPresent) {
+					appendedSinkNotePath = sinkPath;
+					appendedSinkHeading = heading;
+					appendedSinkLine = entryLine;
+					createdSinkSection = res.createdSection;
+				}
+			}
+
+			return {
+				kind: "swipe",
+				deck,
+				direction,
+				directionConfig: dirConfig,
+				card: { ...card, verdict: previousVerdict },
+				previousVerdict,
+				hadPreviousVerdictProp: true,
+				movedToPath: null,
+				appendedSinkNotePath,
+				appendedSinkHeading,
+				appendedSinkLine,
+				createdSinkSection,
+				changedFileStatus,
+				hadPreviousFileStatus,
+				previousFileStatus,
+				trashed: false,
+			};
+		} catch (err) {
+			// Roll back frontmatter status and card verdict so the card stays cleanly pending
+			if (changedFileStatus) {
+				try {
+					await this.app.fileManager.processFrontMatter(
+						file,
+						(fm: Record<string, unknown>) => {
+							if (hadPreviousFileStatus) {
+								fm.status = previousFileStatus;
+							} else {
+								delete fm.status;
+							}
+						}
+					);
+				} catch {
+					// Best-effort rollback
+				}
+			}
+			try {
+				await this.app.vault.process(file, (content) => {
+					const res = updateCardVerdictInContent(
+						content,
+						card,
+						previousVerdict,
+						deck
+					);
+					return res.updatedContent;
+				});
+			} catch {
+				// Best-effort rollback
+			}
+			throw err;
+		}
 	}
 
 	private async applyNoteCardSwipe(
@@ -291,7 +367,6 @@ export class SwipeTriageVaultService {
 		const dirConfig = deck.directions[direction];
 		const verdictField = deck.verdictField.trim() || "verdict";
 
-		// Trash action: respect user's Obsidian deleted-files preference
 		if (dirConfig.action === "trash") {
 			await this.app.fileManager.trashFile(file);
 			return {
@@ -307,14 +382,17 @@ export class SwipeTriageVaultService {
 				appendedSinkHeading: null,
 				appendedSinkLine: null,
 				createdSinkSection: false,
+				changedFileStatus: false,
+				hadPreviousFileStatus: false,
 				previousFileStatus: null,
 				trashed: true,
 			};
 		}
 
-		// Record verdict in frontmatter if verdict value is configured
+		let wroteVerdict = false;
 		let hadPreviousVerdictProp = false;
 		let previousVerdict: string | undefined;
+
 		if (dirConfig.verdict.trim()) {
 			await this.app.fileManager.processFrontMatter(
 				file,
@@ -328,6 +406,7 @@ export class SwipeTriageVaultService {
 								: undefined;
 					}
 					fm[verdictField] = dirConfig.verdict.trim();
+					wroteVerdict = true;
 				}
 			);
 		}
@@ -336,47 +415,86 @@ export class SwipeTriageVaultService {
 		let appendedSinkHeading: string | null = null;
 		let appendedSinkLine: string | null = null;
 		let createdSinkSection = false;
-
-		if (dirConfig.action === "append-note" && dirConfig.targetNote?.trim()) {
-			const sinkPath = normalizePath(dirConfig.targetNote.trim());
-			const heading = dirConfig.targetHeading?.trim() || "## Saved items";
-			const entryLine = formatSinkEntry(card);
-			const res = await this.appendToSinkNote(sinkPath, heading, entryLine);
-			if (!res.alreadyPresent) {
-				appendedSinkNotePath = sinkPath;
-				appendedSinkHeading = heading;
-				appendedSinkLine = entryLine;
-				createdSinkSection = res.createdSection;
-			}
-		}
-
 		let movedToPath: string | null = null;
-		if (dirConfig.action === "move" && dirConfig.targetFolder?.trim()) {
-			const destFolder = normalizePath(dirConfig.targetFolder.trim());
-			await this.ensureFolderExists(destFolder);
-			const destPath = this.resolveUniqueFilePath(destFolder, file.name);
-			if (destPath !== file.path) {
-				await this.app.fileManager.renameFile(file, destPath);
-				movedToPath = destPath;
-			}
-		}
 
-		return {
-			kind: "swipe",
-			deck,
-			direction,
-			directionConfig: dirConfig,
-			card,
-			previousVerdict,
-			hadPreviousVerdictProp,
-			movedToPath,
-			appendedSinkNotePath,
-			appendedSinkHeading,
-			appendedSinkLine,
-			createdSinkSection,
-			previousFileStatus: null,
-			trashed: false,
-		};
+		try {
+			if (dirConfig.action === "append-note" && dirConfig.targetNote?.trim()) {
+				const sinkPath = normalizePath(dirConfig.targetNote.trim());
+				const heading = dirConfig.targetHeading?.trim() || "## Saved items";
+				const entryLine = formatSinkEntry(card);
+				const res = await this.appendToSinkNote(sinkPath, heading, entryLine);
+				if (!res.alreadyPresent) {
+					appendedSinkNotePath = sinkPath;
+					appendedSinkHeading = heading;
+					appendedSinkLine = entryLine;
+					createdSinkSection = res.createdSection;
+				}
+			}
+
+			if (dirConfig.action === "move" && dirConfig.targetFolder?.trim()) {
+				const destFolder = normalizePath(dirConfig.targetFolder.trim());
+				await this.ensureFolderExists(destFolder);
+				const destPath = this.resolveUniqueFilePath(destFolder, file.name);
+				if (destPath !== file.path) {
+					await this.app.fileManager.renameFile(file, destPath);
+					movedToPath = destPath;
+				}
+			}
+
+			return {
+				kind: "swipe",
+				deck,
+				direction,
+				directionConfig: dirConfig,
+				card,
+				previousVerdict,
+				hadPreviousVerdictProp,
+				movedToPath,
+				appendedSinkNotePath,
+				appendedSinkHeading,
+				appendedSinkLine,
+				createdSinkSection,
+				changedFileStatus: false,
+				hadPreviousFileStatus: false,
+				previousFileStatus: null,
+				trashed: false,
+			};
+		} catch (err) {
+			// Roll back sink append and frontmatter verdict so rescanning never loses the card
+			if (appendedSinkNotePath && appendedSinkHeading && appendedSinkLine) {
+				try {
+					const sinkFile =
+						this.app.vault.getAbstractFileByPath(appendedSinkNotePath);
+					if (sinkFile instanceof TFile) {
+						const h = appendedSinkHeading;
+						const l = appendedSinkLine;
+						const rmEmpty = createdSinkSection;
+						await this.app.vault.process(sinkFile, (content) =>
+							removeSinkEntry(content, h, l, rmEmpty)
+						);
+					}
+				} catch {
+					// Best-effort rollback
+				}
+			}
+			if (wroteVerdict) {
+				try {
+					await this.app.fileManager.processFrontMatter(
+						file,
+						(fm: Record<string, unknown>) => {
+							if (hadPreviousVerdictProp) {
+								fm[verdictField] = previousVerdict ?? "";
+							} else {
+								delete fm[verdictField];
+							}
+						}
+					);
+				} catch {
+					// Best-effort rollback
+				}
+			}
+			throw err;
+		}
 	}
 
 	/**
@@ -391,7 +509,10 @@ export class SwipeTriageVaultService {
 		const currentPath = entry.movedToPath ?? entry.card.filePath;
 		const abstract = this.app.vault.getAbstractFileByPath(currentPath);
 		if (!(abstract instanceof TFile)) {
-			throw new Error(`Note not found for undo: ${currentPath}`);
+			throw new StaleDeckError(
+				"missing-file",
+				`Note not found for undo at "${currentPath}".`
+			);
 		}
 
 		if (entry.deck.mode === "cards") {
@@ -406,16 +527,19 @@ export class SwipeTriageVaultService {
 				return res.updatedContent;
 			});
 
-			if (entry.previousFileStatus !== null) {
+			if (entry.changedFileStatus) {
 				await this.app.fileManager.processFrontMatter(
 					abstract,
 					(fm: Record<string, unknown>) => {
-						fm.status = entry.previousFileStatus;
+						if (entry.hadPreviousFileStatus) {
+							fm.status = entry.previousFileStatus;
+						} else {
+							delete fm.status;
+						}
 					}
 				);
 			}
 		} else {
-			// Move note back first if it was relocated
 			if (entry.movedToPath && entry.movedToPath !== entry.card.filePath) {
 				const parentSlash = entry.card.filePath.lastIndexOf("/");
 				if (parentSlash > 0) {
@@ -426,7 +550,6 @@ export class SwipeTriageVaultService {
 				await this.app.fileManager.renameFile(abstract, entry.card.filePath);
 			}
 
-			// Restore or remove frontmatter verdict property
 			const verdictField = entry.deck.verdictField.trim() || "verdict";
 			if (entry.directionConfig.verdict.trim()) {
 				await this.app.fileManager.processFrontMatter(
@@ -442,7 +565,6 @@ export class SwipeTriageVaultService {
 			}
 		}
 
-		// Remove appended checklist line from sink note if applicable
 		if (
 			entry.appendedSinkNotePath &&
 			entry.appendedSinkHeading &&
@@ -464,9 +586,6 @@ export class SwipeTriageVaultService {
 		return true;
 	}
 
-	/**
-	 * Safely trashes empty digest files using Obsidian's fileManager.trashFile.
-	 */
 	async trashFiles(files: TFile[]): Promise<number> {
 		let count = 0;
 		for (const file of files) {
@@ -476,11 +595,7 @@ export class SwipeTriageVaultService {
 		return count;
 	}
 
-	/**
-	 * Writes a `_deck.md` file inside the deck's folder so humans and AI agents
-	 * can inspect or customize it right alongside the notes.
-	 */
-	async writeDeckFile(deck: DeckConfig): Promise<TFile> {
+	async writeDeckFile(deck: DeckConfig, overwrite = true): Promise<TFile> {
 		const folder = normalizePath(deck.folderPath.trim());
 		if (folder) {
 			await this.ensureFolderExists(folder);
@@ -491,6 +606,9 @@ export class SwipeTriageVaultService {
 		const content = generateDeckFileMarkdown(deck);
 		const existing = this.app.vault.getAbstractFileByPath(deckPath);
 		if (existing instanceof TFile) {
+			if (!overwrite) {
+				throw new DeckAlreadyExistsError(existing.path);
+			}
 			await this.app.vault.modify(existing, content);
 			return existing;
 		}
@@ -499,17 +617,25 @@ export class SwipeTriageVaultService {
 
 	/**
 	 * Scaffolds a ready-to-use triage folder with `_deck.md`, outcome folders or
-	 * sink notes, and sample cards so users can start swiping immediately.
+	 * sink notes, and sample cards. Refuses to overwrite an existing `_deck.md`
+	 * unless `overwriteDeckFile` is explicitly true.
 	 */
 	async scaffoldTriageFolder(
 		folderPath: string,
 		preset: PresetId,
 		customName?: string,
-		includeSamples = true
+		includeSamples = true,
+		overwriteDeckFile = false
 	): Promise<DeckConfig> {
 		const cleanedFolder = normalizePath(
 			folderPath.trim().replace(/^\/+|\/+$/g, "")
 		);
+
+		const existingDeck = this.getExistingDeckFile(cleanedFolder);
+		if (existingDeck && !overwriteDeckFile) {
+			throw new DeckAlreadyExistsError(existingDeck.path);
+		}
+
 		const deck = createDeckFromPreset(
 			preset,
 			cleanedFolder,
@@ -521,7 +647,6 @@ export class SwipeTriageVaultService {
 			await this.ensureFolderExists(cleanedFolder);
 		}
 
-		// Create destination subfolders for any "move" actions
 		const dirs: SwipeDirection[] = ["left", "down", "right", "up"];
 		for (const d of dirs) {
 			const cfg = deck.directions[d];
@@ -531,7 +656,7 @@ export class SwipeTriageVaultService {
 			if (cfg.action === "append-note" && cfg.targetNote) {
 				const sinkPath = normalizePath(cfg.targetNote);
 				if (!this.app.vault.getAbstractFileByPath(sinkPath)) {
-					await this.createEmptySinkNote(
+					await this.createSinkNote(
 						sinkPath,
 						cfg.targetHeading || "## Saved items"
 					);
@@ -539,10 +664,8 @@ export class SwipeTriageVaultService {
 			}
 		}
 
-		// Write _deck.md
-		const deckFile = await this.writeDeckFile(deck);
+		const deckFile = await this.writeDeckFile(deck, overwriteDeckFile);
 
-		// Create starter sample items if requested and folder has no notes yet
 		if (includeSamples) {
 			const today = new Date().toISOString().slice(0, 10);
 			const samples = generateSampleFiles(deck, today);
@@ -566,7 +689,10 @@ export class SwipeTriageVaultService {
 	async openCardSourceNote(card: TriageCard): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(card.filePath);
 		if (!(file instanceof TFile)) {
-			throw new Error(`Note not found: ${card.filePath}`);
+			throw new StaleDeckError(
+				"missing-file",
+				`Note not found: ${card.filePath}`
+			);
 		}
 		const leaf = this.app.workspace.getLeaf("tab");
 		await leaf.openFile(file, {
@@ -585,6 +711,52 @@ export class SwipeTriageVaultService {
 		await leaf.openFile(file);
 	}
 
+	private buildSinkNoteContent(
+		sinkPath: string,
+		sectionHeading: string,
+		initialEntry?: string
+	): string {
+		const today = new Date().toISOString().slice(0, 10);
+		const basename =
+			sinkPath.split("/").pop()?.replace(/\.md$/i, "") || "Saved items";
+		const lines = [
+			"---",
+			`title: ${JSON.stringify(basename)}`,
+			`created: ${today}`,
+			`updated: ${today}`,
+			"tags: [swipe-triage]",
+			"---",
+			"",
+			`# ${basename}`,
+			"",
+		];
+		if (!initialEntry) {
+			lines.push("Items promoted during Swipe Triage sessions land below.", "");
+		}
+		lines.push(sectionHeading, "");
+		if (initialEntry) {
+			lines.push(initialEntry, "");
+		}
+		return lines.join("\n");
+	}
+
+	private async createSinkNote(
+		sinkPath: string,
+		sectionHeading: string,
+		initialEntry?: string
+	): Promise<void> {
+		const lastSlash = sinkPath.lastIndexOf("/");
+		if (lastSlash > 0) {
+			await this.ensureFolderExists(sinkPath.slice(0, lastSlash));
+		}
+		const content = this.buildSinkNoteContent(
+			sinkPath,
+			sectionHeading,
+			initialEntry
+		);
+		await this.app.vault.create(sinkPath, content);
+	}
+
 	private async appendToSinkNote(
 		sinkPath: string,
 		sectionHeading: string,
@@ -593,31 +765,7 @@ export class SwipeTriageVaultService {
 		const existing = this.app.vault.getAbstractFileByPath(sinkPath);
 
 		if (!(existing instanceof TFile)) {
-			const lastSlash = sinkPath.lastIndexOf("/");
-			if (lastSlash > 0) {
-				await this.ensureFolderExists(sinkPath.slice(0, lastSlash));
-			}
-			const today = new Date().toISOString().slice(0, 10);
-			const basename = sinkPath
-				.split("/")
-				.pop()
-				?.replace(/\.md$/i, "") || "Saved items";
-			const initialContent = [
-				"---",
-				`title: ${JSON.stringify(basename)}`,
-				`created: ${today}`,
-				`updated: ${today}`,
-				"tags: [swipe-triage]",
-				"---",
-				"",
-				`# ${basename}`,
-				"",
-				sectionHeading,
-				"",
-				entryLine,
-				"",
-			].join("\n");
-			await this.app.vault.create(sinkPath, initialContent);
+			await this.createSinkNote(sinkPath, sectionHeading, entryLine);
 			return { createdSection: true, alreadyPresent: false };
 		}
 
@@ -630,35 +778,6 @@ export class SwipeTriageVaultService {
 			return res.updatedContent;
 		});
 		return { createdSection, alreadyPresent };
-	}
-
-	private async createEmptySinkNote(
-		sinkPath: string,
-		sectionHeading: string
-	): Promise<void> {
-		const lastSlash = sinkPath.lastIndexOf("/");
-		if (lastSlash > 0) {
-			await this.ensureFolderExists(sinkPath.slice(0, lastSlash));
-		}
-		const today = new Date().toISOString().slice(0, 10);
-		const basename =
-			sinkPath.split("/").pop()?.replace(/\.md$/i, "") || "Saved items";
-		const content = [
-			"---",
-			`title: ${JSON.stringify(basename)}`,
-			`created: ${today}`,
-			`updated: ${today}`,
-			"tags: [swipe-triage]",
-			"---",
-			"",
-			`# ${basename}`,
-			"",
-			"Items promoted during Swipe Triage sessions land below.",
-			"",
-			sectionHeading,
-			"",
-		].join("\n");
-		await this.app.vault.create(sinkPath, content);
 	}
 
 	private async ensureFolderExists(folderPath: string): Promise<void> {

@@ -185,7 +185,27 @@ function yamlQuote(value: string): string {
 	return JSON.stringify(value);
 }
 
-function renderDirectionYaml(dir: SwipeDirection, cfg: DirectionConfig): string[] {
+/**
+ * Converts a target path inside `folderPath` into a portable `./...` relative path
+ * so renaming the deck folder never breaks `_deck.md`.
+ */
+export function toPortableDeckPath(folderPath: string, targetPath: string): string {
+	const cleanTarget = targetPath.trim().replace(/^\/+|\/+$/g, "");
+	if (!cleanTarget) return "";
+	if (cleanTarget.startsWith("./")) return cleanTarget;
+
+	const cleanFolder = folderPath.trim().replace(/^\/+|\/+$/g, "");
+	if (cleanFolder && cleanTarget.startsWith(`${cleanFolder}/`)) {
+		return `./${cleanTarget.slice(cleanFolder.length + 1)}`;
+	}
+	return cleanTarget;
+}
+
+function renderDirectionYaml(
+	dir: SwipeDirection,
+	cfg: DirectionConfig,
+	folderPath: string
+): string[] {
 	const lines = [
 		`  ${dir}:`,
 		`    label: ${yamlQuote(cfg.label)}`,
@@ -194,11 +214,19 @@ function renderDirectionYaml(dir: SwipeDirection, cfg: DirectionConfig): string[
 		`    action: ${cfg.action}`,
 	];
 	if (cfg.action === "move" && cfg.targetFolder) {
-		lines.push(`    target_folder: ${yamlQuote(cfg.targetFolder)}`);
+		lines.push(
+			`    target_folder: ${yamlQuote(
+				toPortableDeckPath(folderPath, cfg.targetFolder)
+			)}`
+		);
 	}
 	if (cfg.action === "append-note") {
 		if (cfg.targetNote) {
-			lines.push(`    target_note: ${yamlQuote(cfg.targetNote)}`);
+			lines.push(
+				`    target_note: ${yamlQuote(
+					toPortableDeckPath(folderPath, cfg.targetNote)
+				)}`
+			);
 		}
 		if (cfg.targetHeading) {
 			lines.push(`    target_heading: ${yamlQuote(cfg.targetHeading)}`);
@@ -235,10 +263,10 @@ export function generateDeckFileMarkdown(deck: DeckConfig): string {
 
 	frontmatterLines.push("directions:");
 	frontmatterLines.push(
-		...renderDirectionYaml("left", deck.directions.left),
-		...renderDirectionYaml("down", deck.directions.down),
-		...renderDirectionYaml("right", deck.directions.right),
-		...renderDirectionYaml("up", deck.directions.up)
+		...renderDirectionYaml("left", deck.directions.left, deck.folderPath),
+		...renderDirectionYaml("down", deck.directions.down, deck.folderPath),
+		...renderDirectionYaml("right", deck.directions.right, deck.folderPath),
+		...renderDirectionYaml("up", deck.directions.up, deck.folderPath)
 	);
 	frontmatterLines.push("---", "");
 

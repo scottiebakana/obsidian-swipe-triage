@@ -240,9 +240,22 @@ test("parseNoteCard parses standalone notes, respects pending filter, and skips 
 	assert.equal(done, null);
 });
 
-test("sink note append, deduplication, and undo removal round-trip cleanly", () => {
-	const base = "# Saved\n\nIntro paragraph.\n";
-	const heading = "## Saved items";
+test("sink note append, deduplication, heading-level boundaries, and undo removal round-trip cleanly", () => {
+	const base = [
+		"# Top",
+		"",
+		"### Saved items",
+		"",
+		"- [ ] Existing item",
+		"",
+		"### Other subsection",
+		"",
+		"- [ ] Keep this separate",
+		"",
+		"# Next top section",
+		"",
+	].join("\n");
+	const heading = "### Saved items";
 
 	const noteLine = formatSinkEntry({
 		mode: "notes",
@@ -258,16 +271,64 @@ test("sink note append, deduplication, and undo removal round-trip cleanly", () 
 	);
 
 	const step1 = appendSinkEntry(base, heading, noteLine);
-	assert.equal(step1.createdSection, true);
+	assert.equal(step1.createdSection, false);
 	assert.equal(step1.alreadyPresent, false);
+
+	// New line must land BEFORE `### Other subsection`, not after it!
+	const insertedIdx = step1.updatedContent.indexOf(noteLine);
+	const otherIdx = step1.updatedContent.indexOf("### Other subsection");
+	assert.ok(insertedIdx > 0 && insertedIdx < otherIdx);
 
 	const dup = appendSinkEntry(step1.updatedContent, heading, noteLine);
 	assert.equal(dup.alreadyPresent, true);
 	assert.equal(dup.updatedContent, step1.updatedContent);
 
-	const undone = removeSinkEntry(step1.updatedContent, heading, noteLine, true);
-	assert.equal(undone.trimEnd(), base.trimEnd());
-	assert.ok(!undone.includes(heading));
+	const undone = removeSinkEntry(step1.updatedContent, heading, noteLine, false);
+	assert.equal(undone, base);
+
+	// Also verify section creation + complete undo removal on a fresh note
+	const fresh = "# Saved\n\nIntro paragraph.\n";
+	const created = appendSinkEntry(fresh, "## Saved items", noteLine);
+	assert.equal(created.createdSection, true);
+	const reverted = removeSinkEntry(
+		created.updatedContent,
+		"## Saved items",
+		noteLine,
+		true
+	);
+	assert.equal(reverted.trimEnd(), fresh.trimEnd());
+	assert.ok(!reverted.includes("## Saved items"));
+});
+
+test("fenced code blocks containing ## headings do not split digest cards", () => {
+	const deck = createDeckFromPreset("ai-digest", "AI-Digest");
+	const md = [
+		"---",
+		"status: new",
+		"---",
+		"",
+		"## 1. Markdown code example card",
+		"",
+		"**What it is:** Demonstrates fenced headings.",
+		"",
+		"```markdown",
+		"## Fake heading inside code fence",
+		"**Verdict:** fake",
+		"```",
+		"",
+		"**Verdict:** pending",
+		"",
+	].join("\n");
+
+	const parsed = parseDigestFile(md, "AI-Digest/fenced.md", "fenced.md", deck);
+	assert.equal(parsed.totalCount, 1);
+	assert.equal(parsed.cards[0].title, "Markdown code example card");
+	assert.ok(parsed.cards[0].extraMarkdown.includes("## Fake heading inside code fence"));
+	assert.equal(parsed.cards[0].verdict, "pending");
+
+	const updated = updateCardVerdictInContent(md, parsed.cards[0], "tried", deck);
+	assert.ok(updated.updatedContent.includes("**Verdict:** fake"));
+	assert.ok(updated.updatedContent.includes("**Verdict:** tried"));
 });
 
 test("deck scaffolding, filters, sorting, and AI prompt generation work across all presets", () => {
